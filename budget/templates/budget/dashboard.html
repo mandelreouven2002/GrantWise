@@ -1,43 +1,216 @@
-{% extends "budget/base.html" %}
-{% block title %}סקירה · LabFund{% endblock %}
-{% block content %}
-<div class="titlebar"><h1>סקירה <span class="muted" style="font-weight:400">— {{ active_grants }} מענקים פעילים</span></h1></div>
-<p class="sub">יתרות לפי מענק וסעיף תקציבי. הפירוט המלא, השריונים והחלטות המימון נמצאים בדף <a href="{% url 'grants' %}">מענקים</a>.</p>
 
-<div class="tbl-wrap" style="max-height:none">
-  <table>
-    <thead>
-      <tr>
-        <th>מענק</th>
-        <th>גורם מממן</th>
-        <th>סעיף</th>
-        <th class="num">יתרה</th>
-        <th>מטבע</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for grant in grants %}
-        {% for category in grant.categories %}
-        <tr>
-          <td class="ro"><b>{{ grant.number }}</b></td>
-          <td class="ro">{{ grant.sponsor }}</td>
-          <td class="ro">{{ category.name }}</td>
-          <td class="ro num">{{ category.balance|floatformat:2 }}</td>
-          <td class="ro">{{ grant.currency }}</td>
-        </tr>
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1">
+    <title>GrantWise Dashboard</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 30px;
+            background: #f5f6fa;
+            color: #202638;
+        }
+
+        .container {
+            max-width: 1150px;
+            margin: auto;
+        }
+
+        h1 {
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            color: #64748b;
+            margin-bottom: 30px;
+        }
+
+        .panel {
+            background: white;
+            border-radius: 14px;
+            padding: 26px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 10px #0000000c;
+        }
+
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 12px;
+        }
+
+        select {
+            width: 100%;
+            max-width: 360px;
+            padding: 13px;
+            font-size: 16px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background: white;
+        }
+
+        .chart-row {
+            display: grid;
+            grid-template-columns: 130px 1fr 135px;
+            gap: 16px;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .chart-row:last-child {
+            border-bottom: none;
+        }
+
+        .grant-name {
+            font-weight: bold;
+            direction: ltr;
+            text-align: right;
+            overflow-wrap: anywhere;
+        }
+
+        .bar-track {
+            background: #edf0f8;
+            height: 28px;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .bar {
+            background: #5865d9;
+            height: 100%;
+            border-radius: 6px;
+        }
+
+        .amount {
+            font-weight: bold;
+            direction: ltr;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        .negative {
+            color: #dc2626;
+        }
+
+        .empty {
+            text-align: center;
+            color: #64748b;
+            padding: 25px;
+        }
+
+        .note {
+            color: #64748b;
+            font-size: 13px;
+        }
+
+        @media (max-width: 650px) {
+            body {
+                padding: 15px;
+            }
+
+            .chart-row {
+                grid-template-columns: 80px 1fr 100px;
+                gap: 8px;
+                font-size: 12px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+<div class="container">
+
+    <h1>GrantWise Dashboard</h1>
+    <p class="subtitle">
+        סקירה תקציבית לפי גראנט וקטגוריה
+    </p>
+
+    <!-- Category selection -->
+    <div class="panel">
+        <form method="get">
+            <label for="category">
+                בחרי קטגוריית תקציב
+            </label>
+
+            <select id="category"
+                    name="category"
+                    onchange="this.form.submit()">
+
+                {% for category in categories %}
+                <option value="{{ category.code }}"
+                    {% if category.code == selected_category %}
+                        selected
+                    {% endif %}>
+                    {{ category.name_he }}
+                </option>
+                {% endfor %}
+
+            </select>
+        </form>
+    </div>
+
+    <!-- Bar chart -->
+    <div class="panel">
+        <h2>
+            יתרות לפי גראנט — {{ selected_name }}
+        </h2>
+
+        <p class="note">
+            יתרות מדווחות לפי נתוני הייבוא האחרונים
+        </p>
+
+        {% for group in chart_groups %}
+
+            <h3>מטבע: {{ group.currency }}</h3>
+
+            {% for grant in group.rows %}
+            <div class="chart-row">
+
+                <div class="grant-name"
+                     title="{{ grant.sponsor }}">
+                    {{ grant.number }}
+                </div>
+
+                <div class="bar-track">
+                    <div class="bar"
+                         style="width: {{ grant.width|stringformat:'.2f' }}%">
+                    </div>
+                </div>
+
+                <div class="amount
+                    {% if grant.balance < 0 %}negative{% endif %}">
+                    {{ grant.balance|floatformat:2 }}
+                    {{ group.currency }}
+                </div>
+
+            </div>
+            {% endfor %}
+
         {% empty %}
-        <tr>
-          <td class="ro"><b>{{ grant.number }}</b></td>
-          <td class="ro">{{ grant.sponsor }}</td>
-          <td class="ro muted">יתרה כוללת בלבד</td>
-          <td class="ro num">{{ grant.balance|floatformat:2 }}</td>
-          <td class="ro">{{ grant.currency }}</td>
-        </tr>
+            <p class="empty">
+                לא נמצאו יתרות בקטגוריה זו.
+                אם עדיין לא יובאו נתוני SAP,
+                יש לייבא אותם תחילה.
+            </p>
         {% endfor %}
-      {% empty %}
-        <tr><td class="ro muted" colspan="5">לא נמצאו מענקים פעילים.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+
+        <p class="note">
+            אורך העמודות יחסי ליתרה הגבוהה ביותר
+            בכל מטבע. יתרות שליליות מוצגות במספר
+            אדום וללא עמודה חיובית.
+        </p>
+    </div>
+
 </div>
-{% endblock %}
+</body>
+</html>

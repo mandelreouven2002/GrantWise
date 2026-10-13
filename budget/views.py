@@ -94,41 +94,83 @@ def _ils(amount, ccy):
 
 
 # --------------------------------------------------------------------------- dashboards
+
 @login_required
 def dashboard_view(request):
-    grants = Grant.objects.filter(
-        is_active=True
-    ).prefetch_related(
-        "lines__category"
+    # All active grants
+    grants = list(
+        Grant.objects.filter(is_active=True)
+        .prefetch_related("lines__category")
     )
 
-    dashboard_grants = []
+    # Collect current balances only
+    all_lines = []
+    categories = {}
 
     for grant in grants:
-        categories = []
-
         for line in grant.current_lines():
-            categories.append({
-                "name": line.category.name_he,
-                "balance": line.balance,
-            })
+            categories[line.category_id] = line.category
+            all_lines.append((grant, line))
 
-        dashboard_grants.append({
+    # Sort categories by their configured order
+    category_list = sorted(
+        categories.values(),
+        key=lambda c: (c.sort, c.name_he)
+    )
+
+    selected_category = request.GET.get("category", "")
+
+    # Default to first category
+    if selected_category not in categories:
+        selected_category = (
+            category_list[0].code if category_list else ""
+        )
+
+    # Group results by currency
+    currency_groups = {}
+
+    for grant, line in all_lines:
+        if line.category_id != selected_category:
+            continue
+
+        currency_groups.setdefault(grant.currency, []).append({
             "number": grant.number,
             "sponsor": grant.sponsor,
-            "currency": grant.currency,
-            "balance": grant.balance_total,
-            "categories": categories,
+            "balance": line.balance,
         })
 
-    return render(
-        request,
-        "budget/dashboard.html",
-        {
-            "grants": dashboard_grants,
-            "active_grants": len(dashboard_grants),
-        }
-    )
+    chart_groups = []
+
+    for currency, rows in sorted(currency_groups.items()):
+        max_balance = max(
+            (max(r["balance"], Decimal("0")) for r in rows),
+            default=Decimal("0")
+        )
+
+        for row in rows:
+            positive = max(row["balance"], Decimal("0"))
+            row["width"] = (
+                float(positive / max_balance * 100)
+                if max_balance > 0 else 0
+            )
+
+        rows.sort(key=lambda r: r["balance"], reverse=True)
+
+        chart_groups.append({
+            "currency": currency,
+            "rows": rows,
+        })
+
+    return render(request, "budget/dashboard.html", {
+        "categories": category_list,
+        "selected_category": selected_category,
+        "selected_name": (
+            categories[selected_category].name_he
+            if selected_category else ""
+        ),
+        "chart_groups": chart_groups,
+    })
+
 @login_required
 def grants_view(request):
     today = timezone.localdate()
