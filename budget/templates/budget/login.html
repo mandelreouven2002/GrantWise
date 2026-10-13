@@ -1,0 +1,14 @@
+{% extends "budget/base.html" %}
+{% block title %}כניסה · LabFund{% endblock %}
+{% block content %}
+<div class="card" style="max-width:380px;margin:60px auto">
+  <h1 style="margin-bottom:12px">כניסה</h1>
+  <form method="post">{% csrf_token %}
+    {% if form.errors %}<p class="tag bad">שם משתמש או סיסמה שגויים</p>{% endif %}
+    <p><label class="muted">שם משתמש</label><br><input class="f" name="username" autofocus style="width:100%"></p>
+    <p><label class="muted">סיסמה</label><br><input class="f" type="password" name="password" style="width:100%"></p>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button class="btn">כניסה</button>
+  </form>
+</div>
+{% endblock %}

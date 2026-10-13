@@ -1,0 +1,46 @@
+{% extends "budget/base.html" %}
+{% block title %}הגדרות · LabFund{% endblock %}
+{% block content %}
+<div class="titlebar"><h1>הגדרות</h1></div>
+<nav class="tabs">{% for key, label in tabs %}<a href="?tab={{ key }}" class="{% if key == tab %}on{% endif %}">{{ label }}</a>{% endfor %}</nav>
+
+{% if tab == "fx" %}
+<p class="hint"><span class="info" tabindex="0" aria-label="מידע">i<span class="tip">השערים מתעדכנים לבד בכל כניסה לאתר (לכל היותר פעם בשעה), ומטבע שמופיע כאן זמין לבחירה בכל הדשבורדים. להוספה מספיק קוד בן 3 אותיות (למשל SGD) — השער נמשך מיד.<br><br>
+  מקורות: שער יציג של בנק ישראל ל-14 המטבעות שהוא מפרסם; לכל מטבע אחר ExchangeRate-API (מתעדכן פעם ביום).
+  בכל הקצאה נשמר השער שבו השתמשו, כך ששינוי שער לא משנה החלטות שכבר אושרו. מטבע לא פעיל יורד מרשימות הבחירה, אבל ערכים קיימים בו נשמרים.</span></span>
+  <span class="muted">מקורות: <a href="https://www.boi.org.il/" target="_blank" rel="noopener">בנק ישראל</a> · <a href="https://www.exchangerate-api.com" target="_blank" rel="noopener">Rates By Exchange Rate API</a></span></p>
+{% include "budget/_table.html" with t=currencies %}
+{% include "budget/_inline_add.html" with t=currencies %}
+
+<details style="margin-top:18px"><summary><b>היסטוריית שערים ותיקון ידני</b> <span class="muted">— שער ידני לתאריך מסוים גובר על המשיכה האוטומטית לאותו יום</span></summary>
+  <div style="margin-top:10px">
+    {% include "budget/_table.html" with t=history %}
+    {% include "budget/_inline_add.html" with t=history %}
+  </div>
+</details>
+
+{% elif tab == "projects" %}
+<p class="hint"><span class="info" tabindex="0" aria-label="מידע">i<span class="tip">פרויקטים שמופיעים כאן אפשר לבחור בטבלת ההזמנות, בהמלצות ובהגדרות המענקים. הזמנה בלי פרויקט מוצגת עם "-".
+  פרויקט-על מאפשר לקבוץ תתי-פרויקטים; קישור מענק לפרויקט-על חל גם על תתי-הפרויקטים שלו.</span></span></p>
+{% include "budget/_table.html" with t=projects %}
+{% include "budget/_inline_add.html" with t=projects %}
+
+{% elif tab == "users" %}
+{% if user.is_superuser %}
+<p class="hint"><span class="info" tabindex="0" aria-label="מידע">i<span class="tip">מנהל/ת יכול/ה לנהל משתמשים. משתמש לא פעיל לא יכול להיכנס, אבל ההיסטוריה שלו נשמרת.</span></span></p>
+{% include "budget/_table.html" with t=users %}
+<h2>הוספת משתמש</h2>
+{% include "budget/_inline_add.html" with t=users %}
+{% else %}
+<p class="sub">ניהול משתמשים זמין למנהלים בלבד. כאן אפשר לשנות את הסיסמה שלך.</p>
+{% endif %}
+<h2>שינוי סיסמה</h2>
+<form method="post" action="{% url 'set_password' %}" class="toolbar">{% csrf_token %}
+  {% if user.is_superuser %}
+  <select class="f" name="user">{% for u in all_users %}<option value="{{ u.pk }}" {% if u == user %}selected{% endif %}>{{ u.username }}</option>{% endfor %}</select>
+  {% else %}<input type="hidden" name="user" value="{{ user.pk }}"><span>{{ user.username }}</span>{% endif %}
+  <input class="f" type="password" name="password" placeholder="סיסמה חדשה" required>
+  <button class="btn small">שמירה</button>
+</form>
+{% endif %}
+{% endblock %}

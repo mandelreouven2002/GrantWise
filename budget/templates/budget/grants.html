@@ -1,0 +1,11 @@
+{% extends "budget/base.html" %}{% load money %}
+{% block title %}מענקים · LabFund{% endblock %}
+{% block content %}
+<div class="titlebar"><h1>מענקים <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">היתרות מ-SAP כבר כוללות התחייבויות. "ממתין" = מה ש-SAP עוד לא רואה: החלטות שאושרו בהמלצות, והזמנות שיצאו אחרי תאריך קובץ ה-SAP (לפי ה-GRANT_ID שלהן). ▸ פותח הגדרות מענק: שריונים, כללים ופרויקטים.</span></span></h1>{% include "budget/_lastimport.html" %}<span class="spacer"></span>{% include "budget/_actions.html" %}</div>
+<div class="kpis">
+  <div class="kpi"><b>{{ total_ils|money }} ₪</b><span>זמין במענקים בתוקף (שווי משוער)</span></div>
+  <div class="kpi"><b><a href="{% url 'resolve' %}">{{ open_orders }}</a></b><span>אושרו ב-LabSuit וממתינות להזמנה</span></div>
+</div>
+{% include "budget/_table.html" %}
+<p class="toolbar"><a class="btn small ghost" href="?all={% if show_all %}0{% else %}1{% endif %}">{% if show_all %}רק מענקים פעילים{% else %}הצגת גם מענקים לא פעילים{% endif %}</a></p>
+{% endblock %}

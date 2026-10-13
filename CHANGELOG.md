@@ -1,0 +1,44 @@
+# Changelog
+
+## 0.6.0 — 2026-10-13
+- Scope narrowed to orders, grants and recommendations: the inventory and budget-vs-actual dashboards are removed (their models and CLI importers stay; old inventory prices still fill missing order amounts).
+- The Merge preview warns about orders still "approved" in LabFund that are missing from the file (with an approved-only export: their status probably changed in LabSuit).
+- "Resolve" is now "המלצות" everywhere in the UI (code names unchanged).
+- Automatic update is orders-only, from `…/dashboard/?labId=3861#orders/status[]=approved` (approved orders only): the robot opens the link, logs in, opens the link again and reloads it (LabSuit lands on its home page after login), then Export → popup Export → download.
+- Online updates are always Merge: nothing is hidden or deleted — neither rows missing from the export nor rows added by hand — and lab-edited fields are kept. Stated in the dialog and covered by a test.
+
+## 0.5.0 — 2026-10-13
+- **Automatic update from LabSuit** (inventory and orders): the file button becomes "עדכון ממקור אחר" → file / automatic. A headless Chromium (Playwright) opens the dashboard link, fills the 1st/2nd fields with the saved username/password, clicks "Login", "Export", the popup's "Export", waits up to a minute for the download, and opens the usual Merge preview. Elements are found by their text, not position. Credentials are stored once for both dashboards, password encrypted (Fernet keyed from SECRET_KEY) and never sent back to the browser. Runs as a background job with live progress; failures show a plain message, a manual-file fallback and a screenshot of the moment it stopped. Empty / wrong-type files are rejected before the preview.
+- **Resolve: one grant per request by default** (binary assignment, i.e. a generalized assignment problem with category capacities) — the lab funds a request by writing a single GRANT_ID. "לאפשר פיצול" re-solves it as the LP relaxation. Requests no single grant can cover are flagged with a hint to split by hand. CLI: `run_resolve --split`.
+- Decisions whose LabSuit GRANT_ID already shows the decided grant are marked "עודכן במערכות המעבדה" automatically on orders import (shown in the preview).
+- Tabs reordered: inventory, orders, grants, analysis, Resolve.
+- A rejected automatic download now says which export it actually is (orders vs inventory — e.g. swapped dashboard URLs), lists its sheets and columns, and can be downloaded from the error dialog.
+- LabSuit dashboard links: inventory `…#search-substance/my-lab/simple`, orders `…#orders` (the robot returns to the link after the login redirect).
+- Opening a preview that was already confirmed / cancelled (refresh, back, an old tab, double click) redirects with a message instead of a 404; preview buttons lock after the first click.
+- A missing local Chromium now shows the one-line install command instead of a raw Playwright error.
+- Deployment: Dockerfile on `mcr.microsoft.com/playwright/python:v1.56.0-noble`; `railway.json` builds from it.
+
+## 0.4.0 — 2026-10-13
+- **Import preview:** every file update runs as a dry run first (inside a rolled-back transaction) and opens a preview — new / changed (field-by-field, before → after) / hidden / reactivated / unchanged counts, LabSuit status moves, lab data that is preserved, funding decisions the file would reconcile, and warnings (unknown GRANT_ID labels, unmapped SAP columns or cost elements, decided orders missing from the file). Confirm, cancel, or switch Merge ↔ Replace without re-uploading. Uploads wait in `PendingImport` (DB, so it works across workers). CLI: `import_file … --preview`.
+- **"עודכן במערכות המעבדה"** button on approved decisions in Resolve: records who updated LabSuit / SAP and when; toggleable. It does not release the reservation.
+- **Conservative SAP reconciliation:** a decision is treated as covered by a SAP report only when the order's date (LabSuit PO date, else the lab-updated mark) is on or before the report date. A PO without a date no longer counts as covered. Status renamed "נקלט ב-SAP" → "כלול ביתרת SAP".
+- Imports rewrite only rows that actually changed (orders preview/import ~21 s → ~3 s on the real export).
+
+## 0.3.0 — 2026-10-13
+- **Resolve:** splitting across grants is the default; every recommendation is editable (grant, amount, extra split lines); live allocation summary with per-category checks; "↻ refresh recommendation" resets to the optimum.
+- Approval is all-or-nothing, revalidated in a locked transaction, and is reflected in every dashboard (pending, available, per-category "after decisions", orders column, analysis).
+- Grant ▸ panel lists the funding decisions taken from the grant, by category.
+- Design pass: info tooltips instead of explanatory text, narrower tables (settings moved into ▸), cells that read as text, reduced palette with status dots, slim stats bar.
+- All 14 Bank of Israel currencies tracked from the first migrate; FX precision raised to 10 decimal places (LBP).
+- SAP "budget vs actual": cross-currency total rows (always 0 in the export) are skipped.
+- Version shown in the footer; README rewritten with screenshots.
+
+## 0.2.0
+- Custom editable dashboards (inventory, grants, orders, analysis) replace Django admin entirely; file update with Merge / Replace on each dashboard, add-row where relevant.
+- Resolve computed automatically on entry for approved, not-yet-ordered requests (read-only until approval).
+- Automatic exchange rates on page load (Bank of Israel, ExchangeRate-API fallback); add a currency by 3-letter code.
+- Settings tab: exchange rates, projects, users. Default admin user created on migrate with a reminder to change the password.
+- SAP reconciliation on import; orders placed after the SAP snapshot reduce availability.
+
+## 0.1.0
+- Data model, importers for LabSuit (orders, inventory) and SAP (TRDF balances, budget vs actual), LP-based Resolve from the command line with backtest.

@@ -1,0 +1,630 @@
+import json
+from collections import defaultdict
+from datetime import date, timedelta
+from decimal import Decimal
+
+from django.conf import settings
+from django.contrib import messages
+from django.contrib.auth import update_session_auth_hash
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
+from django.core.paginator import Paginator
+from django.db.models import Count, Q, Sum
+from django.http import Http404, HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
+from django.utils import timezone
+from django.utils.html import format_html, format_html_join
+from django.views.decorators.http import require_POST
+
+from . import autofetch
+from . import resolve as resolver
+from .fx import MissingRate, rate_to_ils
+from .importers import run_import
+from .importers.preview import dry_run
+from .models import (Allocation, AutoFetchJob, PendingImport, SourceCredential, BudgetCategory, FundingAlias, FxRate, Grant, ImportBatch, InventoryItem, OrderRequest,
+                     Project, ResolveRun, TrackedCurrency)
+from .tables import ADMIN_ONLY, TABLES, cell, choices_for, create_row, filtered, last_import, set_value
+
+
+# --------------------------------------------------------------------------- table helpers
+
+def table_ctx(key, qs, request=None, extras=None, paginate=True, row_class=None, expandable=False,
+              detail=None, title=None, parent=None):
+    """Everything the _table.html include needs."""
+    t = TABLES[key]
+    page = None
+    if paginate and request is not None:
+        page = Paginator(qs, t.per_page).get_page(request.GET.get("page"))
+        objs = list(page.object_list)
+    else:
+        objs = list(qs)
+    cols = [c for c in t.cols if not c.hidden]
+    col_choices = {c.field: choices_for(c) for c in cols}
+    rows = []
+    for o in objs:
+        ex = (extras or {}).get(o.pk, {})
+        cells = []
+        for c in cols:
+            d = cell(c, o, ex)
+            ch = col_choices[c.field]
+            if ch and d.get("value") not in ("", None) and d["value"] not in {v for v, _ in ch}:
+                ch = [(d["value"], d["value"])] + list(ch)   # keep unexpected values visible
+            d["choices"] = ch
+            cells.append(d)
+        rows.append(dict(obj=o, pk=o.pk, cells=cells, cls=row_class(o, ex) if row_class else "",
+                         detail=(detail or {}).get(o.pk)))
+    qd = request.GET.copy() if request else None
+    if qd is not None:
+        qd.pop("page", None)
+    return dict(table=t, cols=cols, rows=rows, page=page, qs=qd.urlencode() if qd else "",
+                expandable=expandable, title=title or t.title, parent=parent,
+                add_cols=[dict(col=c, choices=choices_for(c)) for c in t.add_cols()],
+                last=last_import(t))
+
+
+def _cell_with_choices(col, obj):
+    d = cell(col, obj)
+    ch = choices_for(col)
+    if ch and d.get("value") not in ("", None) and d["value"] not in {v for v, _ in ch}:
+        ch = [(d["value"], d["value"])] + list(ch)
+    d["choices"] = ch
+    return d
+
+
+def _awaiting_decision():
+    """Approved in LabSuit, not ordered yet, and no funding decision approved here."""
+    return (OrderRequest.objects.filter(is_current=True, status__in=resolver.OPEN_STATUSES)
+            .exclude(allocations__status=Allocation.Status.APPROVED).distinct())
+
+
+def _funding_labels(order_ids):
+    """{order_id: '2032917 · 132.26 EUR (ממתין ל-SAP)'} for approved / reconciled decisions."""
+    out = defaultdict(list)
+    for a in (Allocation.objects.filter(order_id__in=order_ids, grant__isnull=False,
+                                        status__in=[Allocation.Status.APPROVED, Allocation.Status.SUPERSEDED])
+              .select_related("grant")):
+        if a.status == Allocation.Status.SUPERSEDED:
+            state = "כלול ביתרת SAP"
+        else:
+            state = "עודכן במעבדה, ממתין ל-SAP" if a.lab_updated_at else "ממתין ל-SAP"
+        out[a.order_id].append(f"{a.grant_id} · {a.amount_grant_ccy:,.2f} {a.grant.currency} ({state})")
+    return {k: " + ".join(v) for k, v in out.items()}
+
+
+def _ils(amount, ccy):
+    try:
+        r, _ = rate_to_ils(ccy)
+        return (amount or 0) * r
+    except MissingRate:
+        return None
+
+
+# --------------------------------------------------------------------------- dashboards
+
+@login_required
+def grants_view(request):
+    today = timezone.localdate()
+    show_all = request.GET.get("all") == "1"
+    grants = Grant.objects.all() if show_all else Grant.objects.filter(is_active=True)
+    pending = defaultdict(Decimal)     # approved here, or ordered after the SAP snapshot
+    pending_cat = defaultdict(Decimal)  # same, per (grant, category)
+    sap = ImportBatch.latest("sap_grants")
+    for a in Allocation.objects.filter(status=Allocation.Status.APPROVED, grant__isnull=False).select_related("order"):
+        if not resolver.covered_by_sap(a, sap.as_of if sap else None):
+            pending[a.grant_id] += a.amount_grant_ccy or 0
+            pending_cat[a.grant_id, a.category_id] += a.amount_grant_ccy or 0
+    for num, cat, amount, _o in resolver.unseen_orders(sap.as_of if sap else None, today):
+        pending[num] += amount
+        pending_cat[num, cat] += amount
+
+    extras, detail, total_ils = {}, {}, Decimal("0")
+    for g in grants:
+        lines = {l.category_id: l.balance for l in g.current_lines()}
+        d = g.days_left(today)
+        avail = (g.balance_total or 0) - pending[g.number]
+        flags = []
+        if d is not None and d < 0 and g.balance_total > 0:
+            flags.append(("bad", "הסתיים עם יתרה"))
+        elif d is not None and d <= 120 and g.balance_total > 0:
+            flags.append(("warn", "קרוב לסיום"))
+        if any(v < 0 for k, v in lines.items() if k != "OVERHEAD") and not (d is not None and d < 0):
+            flags.append(("", "חריגה בסעיף"))
+        ils = _ils(avail, g.currency)
+        if ils and avail > 0 and (d is None or d >= 0):
+            total_ils += ils
+        extras[g.pk] = {
+            **{f"line:{k}": v for k, v in lines.items()},
+            **{f"after:{cat}": f"{lines.get(cat, Decimal('0')) - amt:,.0f}"
+               for (num, cat), amt in pending_cat.items() if num == g.number and amt},
+            # days left + status dots (hover for the text) instead of a separate alerts column
+            "days": format_html("{}{}", "" if d is None else (format_html('<span class="muted">הסתיים</span>') if d < 0 else d),
+                                format_html_join("", ' <span class="tag dot {}" title="{}"></span>', flags)),
+            "pending": f"{pending[g.number]:,.0f}" if pending[g.number] else "",
+            "available": format_html("<b>{}</b>", f"{avail:,.0f}"),
+            "ils": f"{ils:,.0f}" if ils is not None else "",
+            "_expired": d is not None and d < 0, "_end": g.end_date or date.max,
+        }
+        detail[g.pk] = dict(
+            reservations=table_ctx("reservations", g.reservations.all(), paginate=False, parent=g),
+            rules=table_ctx("rules", g.rules.all(), paginate=False, parent=g),
+            projects=table_ctx("projectgrants", g.projectgrant_set.select_related("project"), paginate=False,
+                               parent=g),
+            settings=[_cell_with_choices(c, g) for c in TABLES["grants"].cols if c.hidden],
+            decisions=(g.allocation_set.filter(status__in=[Allocation.Status.APPROVED, Allocation.Status.SUPERSEDED])
+                       .select_related("order", "category").order_by("-decided_at")),
+            grant=g)
+    ordered = sorted(grants, key=lambda g: (extras[g.pk]["_expired"], extras[g.pk]["_end"]))
+    t = table_ctx("grants", ordered, request, extras=extras, paginate=False, expandable=True, detail=detail,
+                  row_class=lambda o, ex: "dim" if ex.get("_expired") else "")
+    return render(request, "budget/grants.html", dict(
+        t=t, total_ils=total_ils, show_all=show_all,
+        open_orders=_awaiting_decision().filter(date_requested__gte=today - timedelta(days=180)).count()))
+
+
+@login_required
+def orders_view(request):
+    g = request.GET
+    years = [d.year for d in OrderRequest.objects.dates("date_requested", "year", order="DESC")]
+    year = g.get("year", str(years[0]) if years else "")
+    qs = OrderRequest.objects.filter(is_current=True).select_related("project", "category")
+    if year and year != "all":
+        qs = qs.filter(date_requested__year=int(year))
+    if g.get("status"):
+        qs = qs.filter(status=g["status"])
+    if g.get("open") == "1":
+        qs = qs.filter(status__in=resolver.OPEN_STATUSES)
+    if g.get("noamount") == "1":
+        qs = qs.filter(amount_est__isnull=True)
+    if g.get("pending") == "1":
+        qs = qs.filter(pk__in=_awaiting_decision().values("pk"))
+    qs = filtered(TABLES["orders"], qs, g).order_by("-date_requested", "-id")
+    aliases = FundingAlias.objects.order_by("-needs_review", "kind", "label")
+    t = table_ctx("orders", qs, request)
+    labels = _funding_labels([r["pk"] for r in t["rows"]])
+    for r in t["rows"]:              # fill the calculated "funding decided in LabFund" column
+        for c in r["cells"]:
+            if c["col"].field == "funding":
+                c["value"] = labels.get(r["pk"], "")
+    return render(request, "budget/orders.html", dict(
+        t=t, total=qs.count(), years=years, year=year,
+        aliases=table_ctx("aliases", aliases, paginate=False),
+        review=FundingAlias.objects.filter(needs_review=True).count()))
+
+
+def _resolve_params(request):
+    p = request.GET
+    submitted = "lookback" in p        # an unchecked checkbox sends nothing
+    return dict(respect_labels=(p.get("labels") == "1") if submitted else False,
+                allow_split=(p.get("split") == "1") if submitted else False,
+                lookback_days=int(p.get("lookback") or 180))
+
+
+@login_required
+def resolve_view(request):
+    """Computes the recommendation on every visit — in memory only; nothing is saved until approval."""
+    params = _resolve_params(request)
+    result, error = None, None
+    try:
+        result = resolver.compute(**params)
+    except (ValueError, MissingRate) as e:
+        error = str(e)
+
+    rows, payload = [], {"margin": float(settings.RESOLVE_DEFAULTS["fx_margin"]), "grants": {}, "orders": {}}
+    if result:
+        used_grants = set()
+        for plan in result.plans:
+            c, o = plan.cand, plan.cand.order
+            opts = []
+            for op in plan.options:
+                g, st = op.state.grant, op.state
+                used_grants.add(g.number)
+                opts.append(dict(num=g.number, label=(g.sponsor or g.description)[:40], currency=g.currency,
+                                 end=g.end_date, days=st.days_left, avail_cat=op.avail_cat, total=st.total,
+                                 pooled=st.pooled, rank=op.rank, urgent=op.urgency >= 0.5,
+                                 reserve=g.is_reserve, priority=g.pi_priority))
+            rows.append(dict(order=o, state=plan.state, lines=plan.lines, options=opts,
+                             why_not=sorted(plan.why_not.items()),
+                             cells={f: _cell_with_choices(TABLES["orders"].col(f), o) for f in
+                                    ("amount_est", "amount_currency", "category", "project")}))
+            payload["orders"][o.pk] = dict(amount=float(c.amount), cur=c.currency, rate=float(c.rate),
+                                           cat=c.category, opts=[x["num"] for x in opts])
+        for o in result.needs_amount:
+            rows.append(dict(order=o, state="noamount", lines=[], options=[], why_not=[],
+                             cells={f: _cell_with_choices(TABLES["orders"].col(f), o) for f in
+                                    ("amount_est", "amount_currency", "category", "project")}))
+        for num in used_grants:
+            st = result.states[num]
+            g = st.grant
+            payload["grants"][num] = dict(
+                cur=g.currency, rate=float(st.rate), total=float(st.total), pooled=st.pooled,
+                cats={k: float(v) for k, v in st.cats.items()}, extra={k: float(v) for k, v in st.extra.items()},
+                label=(g.sponsor or g.description)[:40], end=g.end_date.strftime("%d/%m/%Y") if g.end_date else "",
+                days=st.days_left)
+        rank = {"unfunded": 0, "split": 1, "ok": 1, "noamount": 2}
+        rows.sort(key=lambda r: (rank[r["state"]], -(r["order"].date_requested or date.min).toordinal()))
+    payload["catNames"] = dict(BudgetCategory.objects.values_list("code", "name_he"))
+
+    approved = (Allocation.objects.filter(status=Allocation.Status.APPROVED)
+                .select_related("order", "grant").order_by("-decided_at")[:50])
+    return render(request, "budget/resolve.html", dict(
+        result=result, error=error, rows=rows, approved=approved, params=params, payload=payload,
+        n_ready=sum(1 for r in rows if r["state"] != "noamount"),
+        n_noamount=sum(1 for r in rows if r["state"] == "noamount"),
+        n_unfunded=sum(1 for r in rows if r["state"] == "unfunded")))
+
+
+def _dec(v):
+    try:
+        return Decimal(str(v).replace(",", "").strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@login_required
+@require_POST
+def resolve_approve(request):
+    decisions, edited = {}, set()
+    for oid in request.POST.getlist("order"):
+        oid = int(oid)
+        grants = request.POST.getlist(f"g_{oid}")
+        amounts = request.POST.getlist(f"a_{oid}")
+        decisions[oid] = [(g, _dec(a)) for g, a in zip(grants, amounts)]
+        if request.POST.get(f"edited_{oid}") == "1":
+            edited.add(oid)
+    nxt = request.POST.get("next") or "resolve"
+    if not decisions:
+        messages.error(request, "לא סומנו הזמנות לאישור")
+        return redirect(nxt)
+    try:
+        n = resolver.approve_plans(decisions, user=request.user.get_username(), edited=edited)
+        messages.success(request, f"אושרו {n} הזמנות. היתרות בכל הדשבורדים עודכנו (\"ממתין\"). "
+                                  "נשאר לעדכן ידנית את ה-GRANT_ID ב-LabSuit / את ההזמנה ב-SAP — "
+                                  "האישור כאן אינו הזמנת רכש.")
+    except resolver.ApprovalError as e:
+        messages.error(request, "שום דבר לא אושר — יש לתקן ולנסות שוב:")
+        for err in e.errors:
+            messages.error(request, err)
+    return redirect(nxt)
+
+
+@login_required
+@require_POST
+def allocation_cancel(request, pk):
+    a = get_object_or_404(Allocation, pk=pk, status=Allocation.Status.APPROVED)
+    Allocation.objects.filter(order=a.order, status=Allocation.Status.APPROVED).update(
+        status=Allocation.Status.REJECTED, decided_by=request.user.get_username(), decided_at=timezone.now())
+    messages.success(request, f"האישור בוטל: {a.order.item_name}")
+    return redirect("resolve")
+
+
+@login_required
+@require_POST
+def allocation_lab_updated(request, pk):
+    """Toggle 'עודכן במערכות המעבדה' for every approved line of the decision's order."""
+    a = get_object_or_404(Allocation, pk=pk, status=Allocation.Status.APPROVED)
+    lines = Allocation.objects.filter(order=a.order, status=Allocation.Status.APPROVED)
+    if a.lab_updated_at:
+        lines.update(lab_updated_at=None, lab_updated_by="")
+        messages.success(request, f"הסימון בוטל: {a.order.item_name}")
+    else:
+        lines.update(lab_updated_at=timezone.now(), lab_updated_by=request.user.get_username())
+        n = resolver.reconcile()
+        tail = " ההחלטה כבר כלולה ביתרת SAP האחרונה." if n else " הסכום נשאר שמור עד שדוח SAP יכסה את ההזמנה."
+        messages.success(request, f"סומן כעודכן במערכות המעבדה: {a.order.item_name}.{tail}")
+    return redirect(request.POST.get("next") or "resolve")
+
+
+# --------------------------------------------------------------------------- generic API
+
+def _table(key):
+    if key not in TABLES:
+        raise Http404
+    return TABLES[key]
+
+
+@login_required
+@require_POST
+def api_update(request, key, pk):
+    t = _table(key)
+    if key in ADMIN_ONLY and not request.user.is_superuser:
+        return JsonResponse({"ok": False, "error": "רק מנהל/ת יכול/ה לערוך משתמשים"}, status=403)
+    obj = get_object_or_404(t.model, pk=pk)
+    try:
+        data = json.loads(request.body)
+        if key == "users" and obj == request.user and data.get("field") in ("is_active", "is_superuser") \
+                and data.get("value") in (False, "false", "0", ""):
+            raise ValidationError("אי אפשר לבטל את ההרשאות של המשתמש שמחובר עכשיו")
+        set_value(t, obj, data["field"], data.get("value"))
+        if key == "users" and data["field"] == "is_superuser":
+            obj.is_staff = obj.is_superuser
+            obj.save(update_fields=["is_staff"])
+    except ValidationError as e:
+        msgs = e.messages if hasattr(e, "messages") else [str(e)]
+        return JsonResponse({"ok": False, "error": " ".join(msgs)}, status=400)
+    except (KeyError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "בקשה לא תקינה"}, status=400)
+    return JsonResponse({"ok": True})
+
+
+@login_required
+@require_POST
+def api_create(request, key):
+    t = _table(key)
+    if key in ADMIN_ONLY and not request.user.is_superuser:
+        messages.error(request, "רק מנהל/ת יכול/ה להוסיף משתמשים")
+        return redirect(request.POST.get("next") or "/")
+    parent = None
+    if request.POST.get("parent"):
+        parent = get_object_or_404(Grant, pk=request.POST["parent"])
+    try:
+        create_row(t, request.POST, parent=parent)
+        messages.success(request, f"נוספה שורה ל{t.title}")
+    except ValidationError as e:
+        messages.error(request, "לא נוספה שורה: " + " ".join(e.messages))
+    return redirect(request.POST.get("next") or "/")
+
+
+@login_required
+@require_POST
+def api_delete(request, key, pk):
+    t = _table(key)
+    if not t.deletable:
+        raise Http404
+    obj = get_object_or_404(t.model, pk=pk)
+    if key == "orders" and obj.source != "manual":
+        obj.is_current = False          # LabSuit rows are hidden, not deleted (they may return in the next export)
+        obj.save(update_fields=["is_current"])
+    else:
+        obj.delete()
+    return redirect(request.POST.get("next") or "/")
+
+
+@login_required
+@require_POST
+def api_import(request, key):
+    """Step 1: upload → dry run → preview page. Nothing is written until the user confirms."""
+    t = _table(key)
+    f = request.FILES.get("file")
+    nxt = request.POST.get("next") or "/"
+    if not f or not t.source:
+        messages.error(request, "לא נבחר קובץ")
+        return redirect(nxt)
+    try:
+        as_of = date.fromisoformat(request.POST.get("as_of") or date.today().isoformat())
+        latest = ImportBatch.latest(t.source)
+        if t.source in ("sap_grants", "sap_budget") and latest and as_of < latest.as_of \
+                and request.POST.get("confirm_old") != "1":
+            messages.error(request, f"הקובץ מתאריך {as_of:%d/%m/%Y}, ישן מהנתונים הפעילים ({latest.as_of:%d/%m/%Y}). "
+                                    "לא עודכן. כדי לייבא בכל זאת, יש לאשר בחלון העדכון.")
+            return redirect(nxt)
+        PendingImport.objects.filter(created_at__lt=timezone.now() - timedelta(days=1)).delete()
+        min_year = request.POST.get("min_year")
+        p = PendingImport.objects.create(
+            table_key=key, source=t.source, file_name=f.name, data=b"".join(f.chunks()),
+            mode=request.POST.get("mode", "merge"), as_of=as_of,
+            min_year=int(min_year) if min_year and min_year.isdigit() else None,
+            next_url=nxt, uploaded_by=request.user.get_username())
+        _build_preview(p)
+    except Exception as e:  # show parsing problems instead of a 500
+        PendingImport.objects.filter(table_key=key, uploaded_by=request.user.get_username(), preview={}).delete()
+        messages.error(request, f"קריאת הקובץ נכשלה: {e}")
+        return redirect(nxt)
+    return redirect("import_preview", pk=p.pk)
+
+
+def _build_preview(p):
+    p.preview = dry_run(p.source, bytes(p.data), p.file_name, p.as_of, p.mode, user=p.uploaded_by, **p.kwargs())
+    p.save(update_fields=["preview", "mode"])
+
+
+class PreviewGone(Exception):
+    pass
+
+
+def _pending(request, pk):
+    p = PendingImport.objects.filter(pk=pk).first()
+    if p is None or (p.uploaded_by != request.user.get_username() and not request.user.is_superuser):
+        raise PreviewGone
+    return p
+
+
+def _gone(request):
+    """A preview that was already confirmed / cancelled (back button, refresh, double click, an old tab)."""
+    messages.info(request, "התצוגה המקדימה הזו כבר לא פעילה: העדכון כבר אושר או בוטל. "
+                           "כדי לעדכן שוב, בחרו שוב \"עדכון מקובץ\" או \"עדכון אוטומטי\".")
+    ref = request.META.get("HTTP_REFERER", "")
+    return redirect(ref if ref and "/import/" not in ref else "/")
+
+
+def preview_view(fn):
+    def wrapper(request, pk):
+        try:
+            return fn(request, pk)
+        except PreviewGone:
+            return _gone(request)
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
+@login_required
+@preview_view
+def import_preview(request, pk):
+    p = _pending(request, pk)
+    return render(request, "budget/import_preview.html",
+                  dict(p=p, v=p.preview, title=TABLES[p.table_key].title,
+                       source_label=ImportBatch.Source(p.source).label))
+
+
+@login_required
+@require_POST
+@preview_view
+def import_mode(request, pk):
+    p = _pending(request, pk)
+    p.mode = "replace" if p.mode == "merge" else "merge"
+    try:
+        _build_preview(p)
+    except Exception as e:  # noqa: BLE001
+        messages.error(request, f"קריאת הקובץ נכשלה: {e}")
+    return redirect("import_preview", pk=p.pk)
+
+
+@login_required
+@require_POST
+@preview_view
+def import_confirm(request, pk):
+    """Step 2: the real import, from the stored bytes."""
+    p = _pending(request, pk)
+    nxt = p.next_url or "/"
+    try:
+        batch = run_import(p.source, bytes(p.data), p.file_name, p.as_of, p.mode,
+                           user=request.user.get_username(), **p.kwargs())
+        c = p.preview.get("counts", {})
+        parts = [f"{c.get('new', 0)} חדשות", f"{c.get('changed', 0)} השתנו"]
+        if c.get("hidden"):
+            parts.append(f"{c['hidden']} הוסתרו")
+        if batch.stats.get("reconciled"):
+            parts.append(f"{batch.stats['reconciled']} החלטות נכללו ביתרת SAP")
+        if batch.stats.get("lab_marked"):
+            parts.append(f"{batch.stats['lab_marked']} החלטות זוהו כרשומות ב-LabSuit")
+        messages.success(request, f"עודכן מהקובץ {p.file_name} ({'Replace' if p.mode == 'replace' else 'Merge'}) — "
+                                  + ", ".join(parts))
+        p.delete()
+    except Exception as e:  # noqa: BLE001
+        messages.error(request, f"העדכון מהקובץ נכשל: {e}")
+    return redirect(nxt)
+
+
+@login_required
+@require_POST
+@preview_view
+def import_cancel(request, pk):
+    p = _pending(request, pk)
+    nxt = p.next_url or "/"
+    p.delete()
+    messages.info(request, "העדכון בוטל. שום דבר לא השתנה.")
+    return redirect(nxt)
+
+
+# --------------------------------------------------------------------------- automatic update (LabSuit robot)
+
+@login_required
+@require_POST
+def api_autofetch(request, key):
+    """Start the robot for a LabSuit dashboard. Optional username/password replace the saved ones."""
+    if key not in settings.LABSUIT_URLS:
+        raise Http404
+    t = _table(key)
+    user, pw = request.POST.get("username", "").strip(), request.POST.get("password", "")
+    if user or pw:
+        if not (user and pw):
+            return JsonResponse({"ok": False, "error": "צריך גם שם משתמש וגם סיסמה."}, status=400)
+        cred = SourceCredential.objects.filter(source="labsuit").first() or SourceCredential(source="labsuit")
+        cred.username, cred.updated_by = user, request.user.get_username()
+        cred.set_password(pw)
+        cred.save()
+    saved_user, saved_pw = autofetch.credentials()
+    if not saved_user or not saved_pw:
+        return JsonResponse({"ok": False, "need_credentials": True,
+                             "error": "חסרים שם משתמש וסיסמה ל-LabSuit."}, status=400)
+    recent = timezone.now() - timedelta(minutes=5)
+    job = AutoFetchJob.objects.filter(table_key=key, created_at__gte=recent,
+                                      status__in=[AutoFetchJob.Status.QUEUED, AutoFetchJob.Status.RUNNING]).first()
+    if job is None:
+        job = AutoFetchJob.objects.create(table_key=key, source=t.source, next_url=request.POST.get("next") or "/",
+                                          created_by=request.user.get_username(), step="מתחיל")
+        autofetch.start_job(job)
+    return JsonResponse({"ok": True, "job": job.pk})
+
+
+@login_required
+def api_autofetch_status(request, pk):
+    job = get_object_or_404(AutoFetchJob, pk=pk)
+    if job.status in (AutoFetchJob.Status.QUEUED, AutoFetchJob.Status.RUNNING) and \
+            job.created_at < timezone.now() - timedelta(minutes=4):
+        # the worker thread died (e.g. a server restart) — don't leave the user waiting forever
+        job.status, job.error, job.finished_at = AutoFetchJob.Status.FAILED, "העדכון האוטומטי לא הסתיים בזמן.", timezone.now()
+        job.save(update_fields=["status", "error", "finished_at"])
+    data = {"status": job.status, "step": job.step, "error": job.error, "detail": job.detail}
+    if job.status == AutoFetchJob.Status.DONE and job.pending_id:
+        data["preview_url"] = reverse("import_preview", args=[job.pending_id])
+    if job.screenshot:
+        data["screenshot_url"] = reverse("autofetch_shot", args=[job.pk])
+    if job.file_data and job.status == AutoFetchJob.Status.FAILED:
+        data["file_url"] = reverse("autofetch_file", args=[job.pk])
+    return JsonResponse(data)
+
+
+@login_required
+def autofetch_file(request, pk):
+    """The file LabSuit sent, so a rejected download can be inspected or uploaded by hand."""
+    job = get_object_or_404(AutoFetchJob, pk=pk)
+    if not job.file_data:
+        raise Http404
+    r = HttpResponse(bytes(job.file_data), content_type="application/octet-stream")
+    r["Content-Disposition"] = f'attachment; filename="{job.file_name or "labsuit-export.xlsx"}"'
+    return r
+
+
+@login_required
+def autofetch_shot(request, pk):
+    job = get_object_or_404(AutoFetchJob, pk=pk)
+    if not job.screenshot:
+        raise Http404
+    return HttpResponse(bytes(job.screenshot), content_type="image/png")
+
+
+# --------------------------------------------------------------------------- settings
+
+SETTINGS_TABS = [("fx", "שערי חליפין"), ("projects", "פרויקטים"), ("users", "משתמשים")]
+
+
+@login_required
+def settings_view(request):
+    tab = request.GET.get("tab", "fx")
+    ctx = dict(tab=tab, tabs=SETTINGS_TABS)
+    if tab == "fx":
+        extras = {}
+        for c in TrackedCurrency.objects.all():
+            r = FxRate.objects.filter(currency=c.code).order_by("-date").first()
+            extras[c.pk] = dict(rate=(f"{r.rate_to_ils:.4f}" if r.rate_to_ils >= Decimal("0.01")
+                                      else f"{r.rate_to_ils:.8f}".rstrip("0")) if r else "—",
+                                rate_date=r.date.strftime("%d/%m/%Y") if r else "")
+        ctx.update(currencies=table_ctx("currencies", TrackedCurrency.objects.all(), paginate=False, extras=extras,
+                                        row_class=lambda o, ex: "" if o.is_active else "dim"),
+                   history=table_ctx("fx", FxRate.objects.order_by("-date", "currency")[:60], paginate=False))
+    elif tab == "projects":
+        counts = dict(OrderRequest.objects.filter(project__isnull=False).values_list("project")
+                      .annotate(n=Count("id")).values_list("project", "n"))
+        extras = {p.pk: {"orders": counts.get(p.pk, 0) or ""} for p in Project.objects.all()}
+        ctx.update(projects=table_ctx("projects", Project.objects.order_by("-is_active", "name"), paginate=False,
+                                      extras=extras, row_class=lambda o, ex: "" if o.is_active else "dim"))
+    elif tab == "users":
+        extras = {u.pk: {"last_login": timezone.localtime(u.last_login).strftime("%d/%m/%Y %H:%M")
+                         if u.last_login else "—"}
+                  for u in User.objects.all()}
+        ctx.update(users=table_ctx("users", User.objects.order_by("username"), paginate=False, extras=extras,
+                                   row_class=lambda o, ex: "" if o.is_active else "dim"),
+                   all_users=User.objects.order_by("username"))
+    else:
+        raise Http404
+    return render(request, "budget/settings.html", ctx)
+
+
+@login_required
+@require_POST
+def set_password(request):
+    target = get_object_or_404(User, pk=request.POST.get("user"))
+    if target != request.user and not request.user.is_superuser:
+        messages.error(request, "רק מנהל/ת יכול/ה לשנות סיסמה של משתמש אחר")
+    elif len(request.POST.get("password", "")) < 4:
+        messages.error(request, "הסיסמה קצרה מדי (לפחות 4 תווים)")
+    else:
+        target.set_password(request.POST["password"])
+        target.save()
+        if target == request.user:
+            update_session_auth_hash(request, target)
+            request.session["default_password"] = False
+        messages.success(request, f"הסיסמה של {target.username} עודכנה")
+    return redirect("/settings/?tab=users")

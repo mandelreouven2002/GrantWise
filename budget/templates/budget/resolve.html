@@ -1,0 +1,263 @@
+{% extends "budget/base.html" %}{% load money %}
+{% block title %}המלצות · LabFund{% endblock %}
+{% block content %}
+<div class="titlebar"><h1>המלצות — מאיפה לממן <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">בקשות שאושרו ב-LabSuit ועוד לא הוזמנו, וחלוקה מיטבית שלהן בין המענקים לפי היתרות, מועדי הסיום, כללי המענקים, השריונים והמטבע.
+  ההמלצה מחושבת בכל כניסה ולא נשמרת. אפשר לערוך אותה — לבחור מענק אחר, לשנות סכום או לפצל — והסיכום מתעדכן מיד. שום דבר לא משתנה עד "אישור".</span></span></h1><span class="spacer"></span>
+  <form method="get" class="toolbar">
+    <label class="muted" title="ברירת המחדל: כל בקשה ממומנת ממענק אחד, כמו שרושמים GRANT_ID אחד ב-LabSuit"><input type="checkbox" name="split" value="1" {% if params.allow_split %}checked{% endif %} onchange="this.form.submit()"> לאפשר פיצול בין מענקים</label>
+    <label class="muted"><input type="checkbox" name="labels" value="1" {% if params.respect_labels %}checked{% endif %} onchange="this.form.submit()"> לשמור את המענק שסומן ב-LabSuit</label>
+    <label class="muted">רק בקשות מ-<input class="f" name="lookback" value="{{ params.lookback_days }}" style="width:64px" onchange="this.form.submit()"> הימים האחרונים</label>
+  </form>
+</div>
+
+{% if error %}<div class="card"><span class="tag bad">לא ניתן לחשב</span> {{ error }}</div>{% endif %}
+
+{% if result %}
+{% if result.stale_fx %}<ul class="msgs"><li class="error">שערי חליפין ישנים או חסרים: {% for c, d in result.stale_fx %}{{ c }}{% if d %} ({{ d|date:"d/m/Y" }}){% else %} (אין שער){% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}. ההמרה עלולה להיות לא מדויקת.</li></ul>{% endif %}
+
+<div class="kpis">
+  <div class="kpi"><b>{{ n_ready }}</b><span>עם המלצה</span></div>
+  <div class="kpi"><b>{{ n_noamount }}</b><span>חסר סכום</span></div>
+  <div class="kpi"><b>{{ n_unfunded }}</b><span>אין מקור מספיק</span></div>
+  <div class="kpi"><b>{{ result.standing|length }}</b><span>על הזמנה עומדת</span></div>
+  {% if result.skipped %}<div class="kpi"><b>{{ result.skipped|length }}</b><span>אושרו אבל לא בחישוב (פירוט למטה)</span></div>{% endif %}
+  <div class="kpi"><span>יתרות SAP מ-{{ result.sap_as_of|date:"d/m/Y" }}<br>חושב {% now "d/m/Y H:i" %}</span></div>
+</div>
+
+{% if result.alerts %}
+<details class="card"><summary><b>התראות ({{ result.alerts|length }})</b></summary>
+  <ul>{% for a in result.alerts %}<li>{{ a }}</li>{% endfor %}</ul></details>
+{% endif %}
+
+<details class="card"><summary><b>איך נבחרת ההמלצה?</b></summary>
+  <p class="reason">לכל בקשה נבדקים רק מענקים <b>כשירים</b>: בתוקף (עם מרווח ימי החסימה), הסעיף מותר, יש יתרה בסעיף וביתרה הכוללת, והמענק מותר לפרויקט של הבקשה.
+  מבין הכשירים, כל הבקשות מחולקות <b>יחד</b> כך שסך "העלות" מינימלי: מענק שמסתיים מוקדם ונשארה בו יתרה מקבל עדיפות (כדי שלא יאבד כסף), מענקי רזרבה נשמרים לסוף,
+  עדיפות שהגדרת למענק מעלה אותו, והמרת מטבע מקבלת קנס קטן ומרווח ביטחון של {{ result.params.fx_margin|floatformat:2 }} (כ-{% widthratio result.params.fx_margin 1 100 %}%).
+  כל בקשה ממומנת <b>ממענק אחד</b>, כמו שרושמים GRANT_ID אחד ב-LabSuit. אם אין מענק אחד שמכסה את כל הסכום, הבקשה מסומנת "אין מקור מספיק", ואפשר לפצל ידנית או לסמן "לאפשר פיצול". בכל שורה, "פירוט" מציג את כל המענקים הכשירים לפי סדר העדיפות ולמה האחרים נפסלו.</p>
+</details>
+
+<h2>סיכום החלוקה <span class="muted" style="font-weight:400">— מתעדכן לפי הבחירות שלך (רק בקשות מסומנות)</span></h2>
+<div class="tbl-wrap" style="max-height:none;margin-bottom:6px"><table id="summary">
+  <thead><tr><th>מענק</th><th>מסתיים</th><th class="num">בקשות</th><th class="num">זמין עכשיו</th><th class="num">לקחת</th><th class="num">יישאר</th><th class="num">≈ ₪</th><th>בדיקה</th></tr></thead>
+  <tbody></tbody>
+</table></div>
+
+<form method="post" action="{% url 'resolve_approve' %}" id="approve-form" autocomplete="off">{% csrf_token %}
+<input type="hidden" name="next" value="{{ request.get_full_path }}">
+<p class="toolbar">
+  <button class="btn" id="approve-btn">אישור המסומנות</button>
+  <button type="button" class="btn ghost" id="refresh-btn" title="מחזיר להמלצה המיטבית ומבטל עריכות">↻ רענון המלצה</button>
+  <span class="muted" id="approve-hint"></span>
+</p>
+
+<h2>בקשות</h2>
+<div class="tbl-wrap" data-table="orders" style="max-height:none">
+<table id="plans">
+  <thead><tr>
+    <th></th><th>פריט</th><th>LabSuit</th><th class="num">סכום</th><th>מטבע</th><th>סעיף</th><th>פרויקט</th>
+    <th style="min-width:420px">חלוקה (ניתנת לעריכה)</th><th>מצב</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr data-pk="{{ r.order.id }}" data-reload data-state="{{ r.state }}" class="plan-row">
+    <td class="chk">{% if r.state != "noamount" %}<input type="checkbox" class="pick" name="order" value="{{ r.order.id }}" {% if r.state != "unfunded" %}checked{% endif %}>
+      <input type="hidden" name="edited_{{ r.order.id }}" value="0" class="edited-flag">{% endif %}</td>
+    <td class="ro" style="white-space:normal;min-width:220px"><b>{{ r.order.item_name|truncatechars:70 }}</b>
+      <div class="reason">{{ r.order.supplier }} · {{ r.order.requested_by }} · {{ r.order.date_requested|date:"d/m/Y" }}</div></td>
+    <td class="ro">{{ r.order.grant_label|default:"—" }}</td>
+    {% with c=r.cells.amount_est %}{% include "budget/_cell.html" %}{% endwith %}
+    {% with c=r.cells.amount_currency %}{% include "budget/_cell.html" %}{% endwith %}
+    {% with c=r.cells.category %}{% include "budget/_cell.html" %}{% endwith %}
+    {% with c=r.cells.project %}{% include "budget/_cell.html" %}{% endwith %}
+    <td class="ro" style="white-space:normal">
+      {% if r.state == "noamount" %}
+        <span class="tag warn">חסר סכום</span> <span class="reason">הזינו סכום משוער בעמודת "סכום" — ההמלצה תחושב מיד</span>
+      {% elif not r.options %}
+        <span class="tag bad">אין מענק כשיר</span>
+        <div class="reason">{% for num, why in r.why_not %}{{ num }}: {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>
+      {% else %}
+        <div class="lines" data-order="{{ r.order.id }}">
+          {% for l in r.lines %}{% if l.grant %}
+          <div class="line">
+            <select class="f lg" name="g_{{ r.order.id }}">{% for op in r.options %}<option value="{{ op.num }}" {% if op.num == l.grant.number %}selected{% endif %}>{{ op.num }} · {{ op.currency }}{% if op.rank == 1 %} ★{% endif %}</option>{% endfor %}</select>
+            <input class="f la ltr" name="a_{{ r.order.id }}" value="{{ l.amount_orig|floatformat:2 }}" inputmode="decimal" style="width:110px">
+            <span class="muted lconv"></span>
+            <button type="button" class="btn link ldel" title="הסרת השורה">✕</button>
+            <div class="reason lreason">{{ l.reason }}</div>
+          </div>
+          {% endif %}{% endfor %}
+        </div>
+        <template class="line-tpl"><div class="line">
+          <select class="f lg" name="g_{{ r.order.id }}">{% for op in r.options %}<option value="{{ op.num }}">{{ op.num }} · {{ op.currency }}{% if op.rank == 1 %} ★{% endif %}</option>{% endfor %}</select>
+          <input class="f la ltr" name="a_{{ r.order.id }}" value="" inputmode="decimal" style="width:110px">
+          <span class="muted lconv"></span>
+          <button type="button" class="btn link ldel" title="הסרת השורה">✕</button>
+          <div class="reason lreason">נוסף ידנית</div>
+        </div></template>
+        <button type="button" class="btn small ghost ladd">+ פיצול / מענק נוסף</button>
+        <details style="margin-top:6px"><summary class="muted">פירוט: {{ r.options|length }} מענקים כשירים{% if r.why_not %}, {{ r.why_not|length }} נפסלו{% endif %}</summary>
+          <table style="margin-top:6px">
+            <tr><th>#</th><th>מענק</th><th>מסתיים</th><th class="num">זמין בסעיף</th><th class="num">זמין כולל</th><th>הערות</th></tr>
+            {% for op in r.options %}<tr><td class="ro">{{ op.rank }}</td><td class="ro"><b>{{ op.num }}</b> <span class="muted">{{ op.label }}</span></td>
+              <td class="ro">{{ op.end|date:"d/m/Y" }}{% if op.days != None %} ({{ op.days }} ימים){% endif %}</td>
+              <td class="ro num">{% if op.pooled %}<span class="muted">מאגר</span>{% else %}{{ op.avail_cat|money:2 }} {{ op.currency }}{% endif %}</td>
+              <td class="ro num">{{ op.total|money:2 }} {{ op.currency }}</td>
+              <td class="ro reason">{% if op.urgent %}בסכנת אי-ניצול · {% endif %}{% if op.reserve %}רזרבה · {% endif %}{% if op.priority %}עדיפות {{ op.priority }}{% endif %}</td></tr>{% endfor %}
+          </table>
+          {% if r.why_not %}<div class="reason" style="margin-top:6px"><b>לא כשירים:</b> {% for num, why in r.why_not %}{{ num }} — {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>{% endif %}
+        </details>
+      {% endif %}
+    </td>
+    <td class="ro status" style="white-space:normal;min-width:110px"></td>
+  </tr>
+  {% empty %}
+  <tr><td class="ro muted" colspan="9">אין כרגע בקשות שאושרו ועוד לא הוזמנו.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+</form>
+
+{% if result.skipped %}
+<details class="card" style="margin-top:14px"><summary><b>אושרו אבל לא בחישוב ({{ result.skipped|length }})</b> <span class="muted">— ולמה</span></summary>
+  <div class="tbl-wrap" style="margin-top:10px;max-height:50vh"><table>
+    <tr><th>פריט</th><th>LabSuit</th><th>סיבה</th></tr>
+    {% for o, reason in result.skipped %}<tr><td class="ro"><a href="{% url 'orders' %}?year=all&q={{ o.item_name|urlencode }}">{{ o.item_name|truncatechars:60 }}</a></td><td class="ro">{{ o.grant_label|default:"—" }}</td><td class="ro reason">{{ reason }}</td></tr>{% endfor %}
+  </table></div></details>
+{% endif %}
+{% if result.standing %}
+<details class="card"><summary><b>על הזמנה עומדת / שמור-מכור ({{ result.standing|length }})</b> <span class="muted">— כבר מחויבות ב-SAP, לא דורשות החלטה</span></summary>
+  <ul>{% for o in result.standing %}<li>{{ o.item_name }} <span class="muted">({{ o.grant_label }})</span></li>{% endfor %}</ul></details>
+{% endif %}
+{% endif %}
+
+<h2>אושרו ועדיין לא כלולות ביתרת SAP <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הסכומים כאן יורדים מהזמין עד שדוח SAP יכסה את ההזמנה: דוח שתאריכו מאוחר מתאריך ההזמנה ב-LabSuit, או מהיום שסימנת "עודכן במערכות המעבדה" אם ל-LabSuit אין תאריך. SAP מייצא רק יתרות, לכן זו הסקה לפי תאריכים, והזמין הוא הערכה שמרנית.<br><br>"עודכן במערכות המעבדה" = עדכנת את ה-GRANT_ID ב-LabSuit או את ההזמנה ב-SAP. הסימון לא משחרר את הסכום בעצמו.</span></span></h2>
+<div class="tbl-wrap"><table>
+  <tr><th>פריט</th><th>מענק</th><th class="num">סכום בהזמנה</th><th class="num">במטבע המענק</th><th>אושר</th><th>במערכות המעבדה</th><th>נימוק</th><th></th></tr>
+  {% for a in approved %}<tr><td class="ro">{{ a.order.item_name|truncatechars:50 }}</td><td class="ro"><b>{{ a.grant_id }}</b></td>
+    <td class="ro num">{{ a.amount_orig|money:2 }} {{ a.currency_orig }}</td>
+    <td class="ro num">{{ a.amount_grant_ccy|money:2 }} {{ a.grant.currency }}</td><td class="ro">{{ a.decided_by }} · {{ a.decided_at|date:"d/m/Y H:i" }}</td>
+    <td class="ro"><form method="post" action="{% url 'allocation_lab_updated' a.pk %}" class="inline">{% csrf_token %}
+      {% if a.lab_updated_at %}<span class="tag good">עודכן · {{ a.lab_updated_at|date:"d/m/Y" }}</span> <button class="btn link">ביטול סימון</button>
+      {% else %}<button class="btn small ghost">עודכן במערכות המעבדה</button>{% endif %}</form></td>
+    <td class="ro reason">{{ a.reason|truncatechars:120 }}</td>
+    <td><form method="post" action="{% url 'allocation_cancel' a.pk %}">{% csrf_token %}<button class="btn link">ביטול אישור</button></form></td></tr>
+  {% empty %}<tr><td class="ro muted" colspan="8">אין</td></tr>{% endfor %}
+</table></div>
+
+{{ payload|json_script:"resolve-data" }}
+<script>
+(function(){
+  const D = JSON.parse(document.getElementById('resolve-data').textContent);
+  const fmt = (v, d=2) => (isFinite(v) ? v : 0).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d});
+  const num = s => { const v = parseFloat(String(s || '').replace(/,/g, '')); return isNaN(v) ? 0 : v; };
+  const TOL = 0.01;
+
+  function toGrant(o, g, amount){                 // order currency -> grant currency incl. FX margin
+    const m = o.cur !== g.cur ? D.margin : 0;
+    return amount * o.rate * (1 + m) / g.rate;
+  }
+
+  function recalc(){
+    const useT = {}, useC = {}, count = {};
+    let unfundedIls = 0, problems = 0, checked = 0;
+    document.querySelectorAll('tr.plan-row').forEach(tr => {
+      const oid = tr.dataset.pk, o = D.orders[oid], st = tr.querySelector('.status');
+      const pick = tr.querySelector('.pick');
+      if(!o){ return; }
+      let sum = 0;
+      tr.querySelectorAll('.line').forEach(line => {
+        const g = D.grants[line.querySelector('.lg').value], a = num(line.querySelector('.la').value);
+        sum += a;
+        const conv = line.querySelector('.lconv');
+        if(g){ const ag = toGrant(o, g, a); conv.textContent = o.cur !== g.cur ? `= ${fmt(ag)} ${g.cur}` : '';
+          if(pick && pick.checked){
+            const n = line.querySelector('.lg').value;
+            useT[n] = (useT[n] || 0) + ag; useC[n + '|' + o.cat] = (useC[n + '|' + o.cat] || 0) + ag;
+            count[n] = (count[n] || new Set()); count[n].add(oid);
+          }
+        }
+      });
+      const diff = o.amount - sum;
+      let html, bad = false;
+      if(Math.abs(diff) <= TOL){ html = '<span class="tag good">ממומן במלואו</span>'; }
+      else if(diff > 0){ html = `<span class="tag bad">חסר ${fmt(diff)} ${o.cur}</span>`; bad = true;
+        if(pick && pick.checked) unfundedIls += diff * o.rate; }
+      else { html = `<span class="tag bad">עודף ${fmt(-diff)} ${o.cur}</span>`; bad = true; }
+      if(tr.querySelectorAll('.line').length > 1) html += ' <span class="tag info">מפוצל</span>';
+      if(tr.dataset.edited === '1') html += ' <span class="tag warn">נערך</span>';
+      st.innerHTML = html;
+      if(pick && pick.checked){ checked++; if(bad) problems++; }
+    });
+
+    const tb = document.querySelector('#summary tbody'); tb.innerHTML = '';
+    const nums = Object.keys(useT).sort((a, b) => useT[b] * D.grants[b].rate - useT[a] * D.grants[a].rate);
+    let totalIls = 0;
+    nums.forEach(n => {
+      const g = D.grants[n], take = useT[n], after = g.total - take; totalIls += take * g.rate;
+      const notes = [];
+      if(after < -TOL){ notes.push(`<span class="tag bad">חריגה מהיתרה הכוללת</span>`); problems++; }
+      if(!g.pooled){
+        Object.keys(useC).filter(k => k.startsWith(n + '|')).forEach(k => {
+          const cat = k.split('|')[1], cap = (g.cats[cat] || 0) + (g.extra[cat] || 0), left = cap - useC[k];
+          if(left < -TOL){ notes.push(`<span class="tag bad">חריגה בסעיף ${D.catNames[cat] || cat}: ${fmt(left)}</span>`); problems++; }
+          else notes.push(`<span class="muted">${D.catNames[cat] || cat}: יישאר ${fmt(left, 0)}</span>`);
+        });
+      }
+      if(!notes.some(x => x.includes('bad'))) notes.unshift('<span class="tag good">תקין</span>');
+      tb.insertAdjacentHTML('beforeend', `<tr>
+        <td class="ro"><b>${n}</b> <span class="muted">${g.label}</span></td>
+        <td class="ro">${g.end}${g.days !== null ? ` <span class="muted">(${g.days} ימים)</span>` : ''}</td>
+        <td class="ro num">${count[n].size}</td>
+        <td class="ro num">${fmt(g.total, 0)} ${g.cur}</td>
+        <td class="ro num"><b>${fmt(take)} ${g.cur}</b></td>
+        <td class="ro num ${after < 0 ? 'neg' : ''}">${fmt(after, 0)} ${g.cur}</td>
+        <td class="ro num">${fmt(take * g.rate, 0)}</td>
+        <td class="ro" style="white-space:normal">${notes.join(' ')}</td></tr>`);
+    });
+    if(unfundedIls > TOL){ tb.insertAdjacentHTML('beforeend', `<tr><td class="ro" colspan="6"><span class="tag bad">ללא מקור</span> חלק מהבקשות המסומנות לא מחולק במלואו</td><td class="ro num">${fmt(unfundedIls, 0)}</td><td></td></tr>`); }
+    if(!nums.length && unfundedIls <= TOL){ tb.innerHTML = '<tr><td class="ro muted" colspan="8">לא סומנו בקשות</td></tr>'; }
+    else tb.insertAdjacentHTML('beforeend', `<tr class="total"><td class="ro" colspan="6">סה״כ</td><td class="ro num">${fmt(totalIls + unfundedIls, 0)}</td><td></td></tr>`);
+
+    const btn = document.getElementById('approve-btn'), hint = document.getElementById('approve-hint');
+    btn.disabled = !checked || problems > 0;
+    hint.textContent = !checked ? 'לא סומנו בקשות' : (problems ? `יש ${problems} בעיות לתיקון לפני אישור (חוסר/עודף או חריגה)` : `${checked} בקשות מוכנות לאישור`);
+  }
+
+  function markEdited(el){
+    const tr = el.closest('tr.plan-row'); if(!tr) return;
+    tr.dataset.edited = '1'; const f = tr.querySelector('.edited-flag'); if(f) f.value = '1';
+  }
+
+  document.addEventListener('input', e => {
+    if(e.target.matches('.la')){
+      markEdited(e.target);
+      const r = e.target.closest('.line').querySelector('.lreason');
+      if(r && !r.dataset.edited){ r.dataset.edited = '1'; r.textContent = 'הסכום נערך ידנית · ' + r.textContent; }
+      recalc();
+    }
+  });
+  document.addEventListener('change', e => {
+    if(e.target.matches('.lg')){ markEdited(e.target); const r = e.target.closest('.line').querySelector('.lreason'); if(r) r.textContent = 'נבחר ידנית'; recalc(); }
+    if(e.target.matches('.pick')) recalc();
+  });
+  document.addEventListener('click', e => {
+    const add = e.target.closest('.ladd');
+    if(add){
+      const td = add.closest('td'), tr = add.closest('tr'), o = D.orders[tr.dataset.pk];
+      const node = td.querySelector('.line-tpl').content.firstElementChild.cloneNode(true);
+      let sum = 0; td.querySelectorAll('.line .la').forEach(i => sum += num(i.value));
+      node.querySelector('.la').value = Math.max(o.amount - sum, 0).toFixed(2);
+      const used = [...td.querySelectorAll('.line .lg')].map(s => s.value);
+      const free = o.opts.find(n => !used.includes(n)); if(free) node.querySelector('.lg').value = free;
+      td.querySelector('.lines').appendChild(node); markEdited(add); recalc();
+    }
+    const del = e.target.closest('.ldel');
+    if(del){ markEdited(del); del.closest('.line').remove(); recalc(); }
+  });
+  document.getElementById('refresh-btn')?.addEventListener('click', () => { location.href = location.pathname + location.search; });
+  document.getElementById('approve-form')?.addEventListener('keydown', e => { if(e.key === 'Enter' && e.target.matches('.la')) e.preventDefault(); });
+  recalc();
+})();
+</script>
+{% endblock %}

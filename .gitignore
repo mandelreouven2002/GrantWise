@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+db.sqlite3
+staticfiles/
+.env
+# lab exports contain real financial data — never commit them
+data/
+*.xls
+*.XLS
+*.xlsx

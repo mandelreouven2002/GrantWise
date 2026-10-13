@@ -1,0 +1,14 @@
+Django==5.2.18
+dj-database-url==3.1.2
+psycopg[binary]>=3.2,<4
+gunicorn>=23
+whitenoise==6.12.0
+pandas==3.0.5
+openpyxl==3.1.5
+xlrd==2.0.2
+# PuLP 4.x changed its API and no longer bundles a solver; 3.3.2 ships CBC
+PuLP==3.3.2
+requests==2.34.2
+# LabSuit auto-update robot (headless Chromium) — same version as the Dockerfile base image
+playwright==1.56.0
+cryptography>=43

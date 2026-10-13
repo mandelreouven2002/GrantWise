@@ -1,0 +1,12 @@
+{# compact add form under a small sub-table (grant settings). Param: t #}
+<form method="post" action="{% url 'api_create' t.table.key %}" class="toolbar">{% csrf_token %}
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  {% if t.parent %}<input type="hidden" name="parent" value="{{ t.parent.pk }}">{% endif %}
+  {% for a in t.add_cols %}{% with c=a.col %}
+    {% if a.choices %}<select name="{{ c.field }}" class="f">{% for v, l in a.choices %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select>
+    {% elif c.kind == "bool" %}<label class="muted"><input type="checkbox" name="{{ c.field }}" {% if c.default != False %}checked{% endif %}> {{ c.label }}</label>
+    {% elif c.kind == "date" %}<input type="date" name="{{ c.field }}" class="f" title="{{ c.label }}">
+    {% else %}<input name="{{ c.field }}" {% if c.field == "password" %}type="password"{% endif %} class="f" placeholder="{{ c.label }}" style="width:140px" {% if c.required %}required{% endif %}>{% endif %}
+  {% endwith %}{% endfor %}
+  <button class="btn small">הוספה</button>
+</form>

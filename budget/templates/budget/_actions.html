@@ -1,0 +1,72 @@
+{# file-update + add-row buttons and their dialogs. Params: t (table ctx), default_mode #}
+{% with key=t.table.key %}
+{% if t.table.source == "labsuit_orders" %}
+<div class="menu"><button type="button" class="btn" data-menu aria-haspopup="true">עדכון ממקור אחר <span aria-hidden="true">▾</span></button>
+  <div class="menu-list" hidden>
+    <button type="button" data-open="file-{{ key }}"><b>עדכון מקובץ</b><small>קובץ שייצאת מ-LabSuit · Merge או Replace</small></button>
+    <button type="button" data-open="auto-{{ key }}"><b>עדכון אוטומטי</b><small>LabFund מוריד את הקובץ מ-LabSuit בעצמו</small></button>
+  </div></div>
+{% elif t.table.source %}<button type="button" class="btn" data-open="file-{{ key }}">עדכון מקובץ</button>{% endif %}
+{% if t.add_cols and not t.parent %}<button type="button" class="btn ghost" data-open="add-{{ key }}">+ הוספת שורה</button>{% endif %}
+
+{% if t.table.source %}
+<dialog id="file-{{ key }}"><form method="post" enctype="multipart/form-data" action="{% url 'api_import' key %}"
+  data-last="{% if t.last %}{{ t.last.as_of|date:'Y-m-d' }}{% endif %}" data-guard="{% if key == 'grants' or key == 'report' %}1{% endif %}"
+  onsubmit="var l=this.dataset.last, d=this.as_of.value; if(this.dataset.guard && l && d && d < l){ if(!confirm('תאריך הנתונים בקובץ ('+d+') ישן מהנתונים הפעילים ('+l+'). הקובץ יחליף אותם — להמשיך?')) return false; this.confirm_old.value='1'; } return true;">{% csrf_token %}
+  <input type="hidden" name="confirm_old" value="0">
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  <h3>עדכון {{ t.title }} מקובץ</h3>
+  <label>קובץ</label><input type="file" name="file" required class="f">
+  <label>אופן העדכון</label>
+  <div class="seg">
+    <label><input type="radio" name="mode" value="merge" {% if default_mode != "replace" %}checked{% endif %}> <b>Merge</b><small>מעדכן שורות קיימות ומוסיף חדשות. שורות שאינן בקובץ לא משתנות.</small></label>
+    <label><input type="radio" name="mode" value="replace" {% if default_mode == "replace" %}checked{% endif %}> <b>Replace</b><small>הקובץ הוא התמונה המלאה. שורות שאינן בו מוסתרות (לא נמחקות).</small></label>
+  </div>
+  <label>תאריך הנתונים בקובץ</label><input type="date" name="as_of" value="{% now 'Y-m-d' %}" class="f">
+  {% if key == "orders" %}<label>רק משנה (לא חובה — לייצוא חלקי)</label><input name="min_year" inputmode="numeric" class="f" placeholder="למשל 2026">{% endif %}
+  <p class="reason">שדות שערכת כאן (פרויקט, סעיף, סכום ידני, הגדרות מענק) נשמרים בשני המצבים. בשלב הבא תוצג תצוגה מקדימה של השינויים, ושום דבר לא יישמר לפני האישור.</p>
+  <div class="actions"><button class="btn">המשך לתצוגה מקדימה</button><button type="button" class="btn ghost" data-close>ביטול</button></div>
+</form></dialog>
+{% endif %}
+
+{% if t.table.source == "labsuit_orders" %}
+<dialog id="auto-{{ key }}" class="autofetch"><form method="post" action="{% url 'api_autofetch' key %}" autocomplete="off">{% csrf_token %}
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  <h3>עדכון אוטומטי מ-LabSuit — {{ t.title }}</h3>
+  <div class="af-confirm">
+    <p>LabFund ייכנס ל-LabSuit, ייצא את {{ t.title }} ויציג תצוגה מקדימה של השינויים. שום דבר לא נשמר לפני האישור שלך. זה לוקח בדרך כלל פחות מדקה.</p>
+    <p class="reason">העדכון הוא <b>Merge</b>: שורות חדשות נוספות וקיימות מתעדכנות. שום שורה לא נמחקת, וגם לא שורות שהוספת ידנית או שדות שערכת כאן.</p>
+    {% if LABSUIT_USER %}
+    <p class="af-user">משתמש LabSuit: <b dir="ltr">{{ LABSUIT_USER }}</b> <button type="button" class="btn link" data-cred-toggle>שינוי שם משתמש וסיסמה</button></p>
+    {% endif %}
+    <div class="af-cred" {% if LABSUIT_USER %}hidden{% endif %}>
+      {% if not LABSUIT_USER %}<p class="reason">עוד לא נשמרו פרטי כניסה ל-LabSuit. הם נשמרים פעם אחת, והסיסמה מוצפנת ולא מוצגת שוב.</p>{% endif %}
+      <label>שם משתמש ב-LabSuit</label><input class="f" name="username" dir="ltr" autocomplete="off" {% if not LABSUIT_USER %}required{% else %}disabled{% endif %}>
+      <label>סיסמה</label><input class="f" name="password" type="password" dir="ltr" autocomplete="new-password" {% if not LABSUIT_USER %}required{% else %}disabled{% endif %}>
+    </div>
+    <div class="actions"><button class="btn">אישור ועדכון</button><button type="button" class="btn ghost" data-close>ביטול</button></div>
+  </div>
+  <div class="af-progress" hidden>
+    <div class="spinner" aria-hidden="true"></div>
+    <p class="af-step">מתחבר ל-LabSuit…</p>
+    <p class="muted">אפשר להשאיר את החלון פתוח. בסוף תיפתח התצוגה המקדימה.</p>
+  </div>
+  <div class="af-error" hidden>
+    <p><span class="tag bad">העדכון האוטומטי לא הצליח</span></p>
+    <p class="af-msg"></p>
+    <p>הייתה בעיה בהבאת הנתונים האוטומטית. מומלץ להביא אותם ידנית: לייצא את הקובץ מ-LabSuit ולהעלות אותו ב"עדכון מקובץ".</p>
+    <details class="af-detail"><summary class="muted">פרטים טכניים</summary><pre dir="ltr"></pre><a class="af-shot" target="_blank" rel="noopener" hidden>צילום מסך מהרגע שבו זה נכשל</a> <a class="af-file" hidden>הורדת הקובץ שהתקבל מ-LabSuit</a></details>
+    <div class="actions"><button type="button" class="btn" data-switch="file-{{ key }}">עדכון מקובץ</button><button type="button" class="btn ghost" data-close>סגירה</button></div>
+  </div>
+</form></dialog>
+{% endif %}
+
+{% if t.add_cols and not t.parent %}
+<dialog id="add-{{ key }}"><form method="post" action="{% url 'api_create' key %}">{% csrf_token %}
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  <h3>הוספת שורה — {{ t.title }}</h3>
+  {% for a in t.add_cols %}{% include "budget/_field.html" %}{% endfor %}
+  <div class="actions"><button class="btn">הוספה</button><button type="button" class="btn ghost" data-close>ביטול</button></div>
+</form></dialog>
+{% endif %}
+{% endwith %}

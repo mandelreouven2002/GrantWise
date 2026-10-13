@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}LabFund{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#1d2330;--muted:#667085;--line:#e4e7ec;--accent:#2f5bd3;--accent-bg:#eef3ff;
+        --good:#1f7a4d;--warn:#b26a00;--bad:#b42318;--info:#5b5bd6;--good-bg:#e8f5ee;--warn-bg:#fff4e0;--bad-bg:#fdecea;--info-bg:#eeeefc}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Heebo,system-ui,sans-serif}
+  header{background:var(--ink);color:#fff;padding:0 20px;display:flex;gap:24px;align-items:center;flex-wrap:wrap}
+  header .brand{font-weight:700;padding:13px 0}
+  header nav{display:flex;gap:2px;flex-wrap:wrap;flex:1}
+  header a{color:#cfd6e4;text-decoration:none;padding:13px 12px;display:block}
+  header a.on,header a:hover{color:#fff;box-shadow:inset 0 -3px 0 var(--accent)}
+  header form button{background:none;border:0;color:#98a2b3;font:inherit;cursor:pointer}
+  main{max-width:1600px;margin:0 auto;padding:18px 16px 60px}
+  h1{font-size:22px;margin:0} h2{font-size:16px;margin:26px 0 8px}
+  .titlebar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+  .titlebar .spacer{flex:1}
+  .sub{color:var(--muted);margin:2px 0 14px}
+  .muted{color:var(--muted)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px}
+  /* slim stats bar instead of boxes */
+  .kpis{display:flex;flex-wrap:wrap;align-items:baseline;gap:0;margin:6px 0 16px;padding:8px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  .kpi{padding:2px 18px;border-inline-start:1px solid var(--line);display:flex;align-items:baseline;gap:8px}
+  .kpi:first-child{border-inline-start:0;padding-inline-start:0}
+  .kpi b{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums} .kpi span{color:var(--muted);font-size:13px}
+  .kpi a{color:inherit;text-decoration:none} .kpi a:hover{color:var(--accent)}
+  .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+  .tbl-wrap{overflow:auto;max-height:72vh;background:var(--card);border:1px solid var(--line);border-radius:8px}
+  table{border-collapse:collapse;width:100%}
+  th,td{padding:0;border-bottom:1px solid var(--line);text-align:right;vertical-align:middle;white-space:nowrap}
+  th{font-size:12px;color:var(--muted);font-weight:500;background:#fafbfc;position:sticky;top:0;z-index:1;padding:8px 8px}
+  td.ro{padding:6px 8px}
+  td.num,th.num{text-align:left;direction:ltr}
+  tr:hover td{background:#fafcff}
+  tr.dim td,tr.dim input,tr.dim select{color:#98a2b3}
+  tr.total td{font-weight:700;background:#fafbfc}
+  /* editable cells read as plain text; controls appear on hover/focus */
+  select.cell{width:auto;min-width:0;padding-left:8px;appearance:none;-webkit-appearance:none;background-image:none;cursor:pointer}
+  select.cell:hover,select.cell:focus{appearance:auto;-webkit-appearance:auto}
+  input[type=date].cell::-webkit-calendar-picker-indicator{opacity:0}
+  input[type=date].cell:hover::-webkit-calendar-picker-indicator,input[type=date].cell:focus::-webkit-calendar-picker-indicator{opacity:.6}
+  .cell{width:100%;min-width:110px;border:1px solid transparent;background:transparent;font:inherit;color:inherit;
+        padding:6px 8px;border-radius:4px}
+  .cell:hover{border-color:var(--line)} .cell:focus{outline:none;border-color:var(--accent);background:#fff}
+  .cell.num{text-align:left;direction:ltr;font-variant-numeric:tabular-nums;min-width:80px}
+  input[type=date].cell{min-width:118px}
+  .cell.w-m{min-width:170px} .cell.w-l{min-width:220px} .cell.w-xl{min-width:300px}
+  .cell.neg{color:var(--bad)}
+  .cell.saved{background:var(--good-bg)!important;transition:background .2s}
+  .cell.err{background:var(--bad-bg)!important;border-color:var(--bad)}
+  td.chk{text-align:center;padding:0 8px}
+  /* status = small dot + text; colour only where action is needed */
+  .tag{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;color:var(--muted);margin-inline-end:8px;white-space:nowrap}
+  .tag::before{content:"";width:7px;height:7px;border-radius:50%;background:#c3c9d4;flex:none}
+  .tag.good::before{background:#9aa5b4} .tag.info::before{background:var(--accent)}
+  .tag.warn{color:var(--ink)} .tag.warn::before{background:#d99a2b}
+  .tag.bad{color:var(--bad);font-weight:500} .tag.bad::before{background:var(--bad)}
+  .tag.dot{margin:0 2px;cursor:help;vertical-align:middle}
+  /* info tooltips replace explanatory paragraphs */
+  .info{position:relative;display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;
+        border:1px solid #c3c9d4;color:var(--muted);font:600 11px/1 Heebo,system-ui,sans-serif;cursor:help;vertical-align:middle;margin-inline-start:6px}
+  .info .tip{display:none;position:absolute;top:24px;inset-inline-start:-8px;z-index:20;width:min(380px,80vw);background:var(--ink);color:#f2f4f7;
+             font:400 13px/1.55 Heebo,system-ui,sans-serif;padding:10px 12px;border-radius:8px;box-shadow:0 8px 24px rgba(16,24,40,.18);text-align:start}
+  .info:hover .tip,.info:focus .tip{display:block}
+  .hint{margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .hint a{color:var(--muted)}
+  .btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:7px 14px;font:inherit;cursor:pointer;text-decoration:none;display:inline-block;white-space:nowrap}
+  .btn.ghost{background:#fff;color:var(--accent);border:1px solid var(--accent)}
+  .btn.small{padding:3px 10px;font-size:13px}
+  form.inline{display:inline;margin:0}
+  ul.plain{margin:8px 0 0;padding-inline-start:18px} ul.plain li{margin:2px 0}
+  ul.cols{columns:2;column-gap:28px;font-size:13px} @media(max-width:700px){ul.cols{columns:1}}
+  td.old{color:var(--muted);text-decoration:line-through;text-decoration-color:#c8ced8} td.new{font-weight:500}
+  tr.grp td{border-top:1px solid var(--line)}
+  .preview-actions{gap:10px;margin:6px 0 14px}
+  .menu{position:relative;display:inline-block}
+  .menu-list{position:absolute;inset-inline-end:0;top:calc(100% + 6px);z-index:30;background:#fff;border:1px solid var(--line);
+    border-radius:10px;box-shadow:0 12px 32px rgba(16,24,40,.14);padding:6px;min-width:260px}
+  .menu-list button{display:block;width:100%;text-align:start;background:none;border:0;border-radius:7px;padding:9px 12px;font:inherit;cursor:pointer}
+  .menu-list button:hover,.menu-list button:focus{background:var(--info-bg);outline:none}
+  .menu-list small{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+  .af-user{margin:12px 0 4px}
+  .af-progress{text-align:center;padding:18px 0 6px}
+  .af-step{font-weight:500;margin:14px 0 4px}
+  .spinner{width:34px;height:34px;margin:0 auto;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:spin .9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .af-detail pre{white-space:pre-wrap;font-size:12px;max-height:160px;overflow:auto;background:#f6f7f9;padding:8px;border-radius:6px}
+  .btn.link{background:none;color:var(--muted);padding:2px 6px}
+  .btn.link:hover{color:var(--bad)}
+  input.f,select.f{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+  .msgs{list-style:none;padding:0;margin:0 0 14px}
+  .msgs li{padding:10px 14px;border-radius:8px;margin-bottom:6px;background:var(--info-bg)}
+  .msgs li.success{background:var(--good-bg)} .msgs li.error{background:var(--bad-bg)}
+  .foot{margin-top:40px;color:#98a2b3;font-size:12px;text-align:center}
+  .after{font-size:11.5px;color:var(--accent);direction:ltr;text-align:left;padding:0 8px 4px;white-space:nowrap}
+  .reason{color:var(--muted);font-size:12.5px;white-space:normal;line-height:1.4}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px}
+  .ltr{direction:ltr;unicode-bidi:embed}
+  .pager{display:flex;gap:6px;align-items:center;margin:8px 0;color:var(--muted)}
+  .pager a{color:var(--accent);text-decoration:none;padding:2px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+  .toggle{background:none;border:0;cursor:pointer;color:var(--accent);font-size:16px;padding:4px 8px}
+  tr.detail>td{background:#fbfcfe;padding:14px 18px;white-space:normal}
+  tr.detail h3{font-size:14px;margin:0 0 6px}
+  /* modal */
+  dialog{border:0;border-radius:12px;padding:0;max-width:520px;width:calc(100% - 32px);box-shadow:0 20px 60px rgba(0,0,0,.25)}
+  dialog::backdrop{background:rgba(16,24,40,.45)}
+  dialog form{padding:20px}
+  dialog h3{margin:0 0 12px;font-size:17px}
+  dialog label{display:block;margin:10px 0 4px;color:var(--muted);font-size:13px}
+  dialog .f{width:100%}
+  dialog .actions{display:flex;gap:8px;justify-content:flex-start;margin-top:18px}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:8px 0 16px}
+  .tabs a{padding:8px 14px;color:var(--muted);text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .tabs a.on{color:var(--ink);border-color:var(--accent);font-weight:500}
+  .seg{display:flex;gap:8px}
+  .seg label{flex:1;margin:0;border:1px solid var(--line);border-radius:8px;padding:10px;cursor:pointer;color:var(--ink)}
+  .seg label:has(input:checked){border-color:var(--accent);background:var(--accent-bg)}
+  .seg small{display:block;color:var(--muted);margin-top:2px}
+  @media (max-width:600px){main{padding:10px}.kpi{min-width:44%}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">LabFund</div>
+  {% if user.is_authenticated %}
+  <nav>
+    {% with u=request.resolver_match.url_name %}
+    <a href="{% url 'orders' %}" class="{% if u == 'orders' %}on{% endif %}">הזמנות ודרישות</a>
+    <a href="{% url 'grants' %}" class="{% if u == 'grants' %}on{% endif %}">מענקים</a>
+    <a href="{% url 'resolve' %}" class="{% if u == 'resolve' %}on{% endif %}">המלצות</a>
+    <a href="{% url 'settings' %}" class="{% if u == 'settings' %}on{% endif %}" style="margin-inline-start:auto">הגדרות</a>
+    {% endwith %}
+  </nav>
+  <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button>יציאה ({{ user.get_username }})</button></form>
+  {% endif %}
+</header>
+<main>
+  {% if request.session.default_password %}<ul class="msgs"><li class="error">נכנסת עם סיסמת ברירת המחדל. כדאי לשנות אותה ב<a href="/settings/?tab=users">הגדרות → משתמשים</a>.</li></ul>{% endif %}
+  {% if messages %}<ul class="msgs">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
+  {% block content %}{% endblock %}
+  <footer class="foot">LabFund {{ LABFUND_VERSION }} · כלי עזר להחלטות מימון — לא מחליף את SAP או LabSuit</footer>
+</main>
+{% csrf_token %}
+<script>
+(function(){
+  const csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+  // inline cell saving: any .cell inside a row with data-pk inside a table with data-table
+  async function save(el){
+    const tr = el.closest('[data-pk]'), tbl = el.closest('[data-table]');
+    if(!tr || !tbl) return;
+    const value = el.type === 'checkbox' ? el.checked : el.value;
+    el.classList.remove('err','saved'); el.title = '';
+    try{
+      const r = await fetch(`/api/${tbl.dataset.table}/${encodeURIComponent(tr.dataset.pk)}/`, {
+        method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':csrf},
+        body: JSON.stringify({field: el.dataset.f, value})});
+      const j = await r.json();
+      if(!j.ok) throw new Error(j.error || 'שגיאה');
+      el.classList.add('saved'); setTimeout(()=>el.classList.remove('saved'), 900);
+      if(el.dataset.num !== undefined){ el.classList.toggle('neg', parseFloat(el.value) < 0); }
+      if(el.closest('[data-reload]')) location.reload();
+    }catch(e){ el.classList.add('err'); el.title = e.message; alertBar(e.message); }
+  }
+  function alertBar(msg){
+    let ul = document.querySelector('.msgs');
+    if(!ul){ ul = document.createElement('ul'); ul.className='msgs'; document.querySelector('main').prepend(ul); }
+    const li = document.createElement('li'); li.className='error'; li.textContent = msg; ul.prepend(li);
+    setTimeout(()=>li.remove(), 6000);
+  }
+  document.addEventListener('change', e => { if(e.target.classList.contains('cell')) save(e.target); });
+  document.addEventListener('keydown', e => {
+    if(e.key === 'Enter' && e.target.classList.contains('cell') && e.target.tagName === 'INPUT'){ e.preventDefault(); e.target.blur(); }
+  });
+  // "עדכון ממקור אחר" menu
+  document.addEventListener('click', e => {
+    const m = e.target.closest('[data-menu]');
+    document.querySelectorAll('.menu-list').forEach(l => { if(!m || l !== m.nextElementSibling) l.hidden = true; });
+    if(m){ const l = m.nextElementSibling; l.hidden = !l.hidden; }
+    if(e.target.closest('.menu-list [data-open]')) e.target.closest('.menu-list').hidden = true;
+  });
+  document.addEventListener('keydown', e => { if(e.key === 'Escape') document.querySelectorAll('.menu-list').forEach(l => l.hidden = true); });
+
+  // automatic update from LabSuit: confirm → start the robot → poll → open the preview (or explain the failure)
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-cred-toggle]'); if(!t) return;
+    const box = t.closest('form').querySelector('.af-cred');
+    box.hidden = !box.hidden;
+    box.querySelectorAll('input').forEach(i => { i.disabled = box.hidden; i.required = !box.hidden; });
+    if(!box.hidden) box.querySelector('input').focus();
+  });
+  document.addEventListener('click', e => {
+    const s = e.target.closest('[data-switch]'); if(!s) return;
+    s.closest('dialog').close(); document.getElementById(s.dataset.switch).showModal();
+  });
+  function afShow(form, part){ ['confirm','progress','error'].forEach(p => form.querySelector('.af-'+p).hidden = p !== part); }
+  function afFail(form, j){
+    afShow(form, 'error');
+    form.querySelector('.af-msg').textContent = j.error || 'שגיאה';
+    form.querySelector('.af-detail pre').textContent = j.detail || '';
+    form.querySelector('.af-detail').hidden = !(j.detail || j.screenshot_url);
+    const a = form.querySelector('.af-shot'); a.hidden = !j.screenshot_url; if(j.screenshot_url) a.href = j.screenshot_url;
+    const f = form.querySelector('.af-file'); f.hidden = !j.file_url; if(j.file_url) f.href = j.file_url;
+    form.querySelector('.af-detail').hidden = !(j.detail || j.screenshot_url || j.file_url);
+  }
+  document.addEventListener('submit', async e => {
+    const form = e.target; if(!form.closest('dialog.autofetch')) return;
+    e.preventDefault();
+    afShow(form, 'progress'); form.querySelector('.af-step').textContent = 'מתחבר ל-LabSuit…';
+    let j;
+    try{
+      const r = await fetch(form.action, {method:'POST', body:new FormData(form), headers:{'X-CSRFToken':csrf}});
+      j = await r.json();
+    }catch(err){ j = {ok:false, error:'אין תקשורת עם השרת.'}; }
+    if(!j.ok){
+      if(j.need_credentials){ afShow(form,'confirm'); const box = form.querySelector('.af-cred'); box.hidden = false;
+        box.querySelectorAll('input').forEach(i => { i.disabled = false; i.required = true; }); alertBar(j.error); return; }
+      return afFail(form, j);
+    }
+    form.querySelectorAll('.af-cred input[type=password]').forEach(i => i.value = '');
+    const poll = async () => {
+      let s;
+      try{ s = await (await fetch(`/autofetch/${j.job}/`)).json(); }catch(err){ return setTimeout(poll, 3000); }
+      if(s.step) form.querySelector('.af-step').textContent = s.step + '…';
+      if(s.status === 'done' && s.preview_url){ form.querySelector('.af-step').textContent = 'פותח את התצוגה המקדימה…'; location.href = s.preview_url; return; }
+      if(s.status === 'failed') return afFail(form, s);
+      setTimeout(poll, 1500);
+    };
+    poll();
+  });
+  document.addEventListener('close', e => {
+    if(e.target.matches && e.target.matches('dialog.autofetch')){
+      const f = e.target.querySelector('form'); if(!f.querySelector('.af-progress').hidden) return;
+      afShow(f, 'confirm');
+    }
+  }, true);
+
+  // modals and expandable rows
+  document.addEventListener('click', e => {
+    const o = e.target.closest('[data-open]'); if(o){ document.getElementById(o.dataset.open).showModal(); }
+    const c = e.target.closest('[data-close]'); if(c){ c.closest('dialog').close(); }
+    const t = e.target.closest('[data-toggle]');
+    if(t){ const row = document.getElementById(t.dataset.toggle); row.hidden = !row.hidden; t.textContent = row.hidden ? '▸' : '▾'; }
+  });
+})();
+</script>
+</body>
+</html>

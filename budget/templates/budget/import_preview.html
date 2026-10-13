@@ -1,0 +1,94 @@
+{% extends "budget/base.html" %}
+{% block title %}תצוגה מקדימה · {{ title }} · LabFund<script>
+  // one submit only: a double click on "אישור ועדכון" must not run the import twice
+  document.querySelectorAll('.preview-actions form').forEach(f => f.addEventListener('submit', () => {
+    document.querySelectorAll('.preview-actions button').forEach(b => b.disabled = true);
+    const btn = f.querySelector('button'); if(btn && f.action.endsWith('/confirm/')) btn.textContent = 'מעדכן…';
+  }));
+</script>
+{% endblock %}
+{% block content %}
+<div class="titlebar"><h1>תצוגה מקדימה — עדכון {{ title }} מקובץ <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הקובץ נקרא והעדכון חושב, אבל שום דבר עוד לא נשמר. כאן רואים מה ישתנה בדיוק. "אישור ועדכון" מבצע את העדכון; "ביטול" משאיר הכול כמו שהוא.<br><br>
+  <b>Merge</b> מעדכן ומוסיף. <b>Replace</b> מתייחס לקובץ כתמונה המלאה ומסתיר שורות שאינן בו. בשני המצבים שדות שנערכו ב-LabFund והחלטות מימון נשמרים.</span></span></h1></div>
+
+<p class="sub">{{ source_label }} · <b dir="ltr">{{ p.file_name }}</b> · נתונים מ-{{ p.as_of|date:"d/m/Y" }} · הועלה ע״י {{ p.uploaded_by }}</p>
+
+<div class="toolbar preview-actions">
+  <form method="post" action="{% url 'import_confirm' p.pk %}" class="inline">{% csrf_token %}<button class="btn">אישור ועדכון</button></form>
+  <form method="post" action="{% url 'import_cancel' p.pk %}" class="inline">{% csrf_token %}<button class="btn ghost">ביטול</button></form>
+  <span class="muted">אופן העדכון: <b>{% if p.mode == "replace" %}Replace{% else %}Merge{% endif %}</b></span>
+  <form method="post" action="{% url 'import_mode' p.pk %}" class="inline">{% csrf_token %}<button class="btn link">להציג עם {% if p.mode == "replace" %}Merge{% else %}Replace{% endif %} במקום</button></form>
+</div>
+
+{% with c=v.counts %}
+<div class="kpis">
+  <div class="kpi"><b>{{ c.new }}</b><span>{% if v.per_batch %}שורות חדשות בדוח{% else %}חדשות{% endif %}</span></div>
+  <div class="kpi"><b>{{ c.changed }}</b><span>ישתנו</span></div>
+  <div class="kpi"><b>{{ c.hidden }}</b><span>{% if v.per_batch %}לא מופיעות בדוח החדש{% else %}יוסתרו{% endif %}</span></div>
+  {% if c.reactivated %}<div class="kpi"><b>{{ c.reactivated }}</b><span>יחזרו לפעילות</span></div>{% endif %}
+  <div class="kpi"><b>{{ c.unchanged }}</b><span>ללא שינוי</span></div>
+  {% if c.reconciled %}<div class="kpi"><b>{{ c.reconciled }}</b><span>החלטות ייכללו ביתרת SAP</span></div>{% endif %}
+  <div class="kpi"><span>{{ c.in_file }} שורות בקובץ</span></div>
+</div>
+{% endwith %}
+
+{% if v.warnings %}<ul class="msgs">{% for w in v.warnings %}<li class="error">{{ w }}</li>{% endfor %}</ul>{% endif %}
+
+{% if v.preserved %}
+<div class="card"><b>נשמר כמו שהוא</b> <span class="muted">— נתונים שהוגדרו ב-LabFund ולא מגיעים מהקובץ</span>
+  <ul class="plain">{% for name, n in v.preserved %}<li>{{ name }}: <b>{{ n }}</b></li>{% endfor %}</ul></div>
+{% endif %}
+
+{% if v.lab_marked %}
+<div class="card"><b>החלטות שכבר נרשמו ב-LabSuit ({{ v.lab_marked|length }})</b> <span class="muted">— ה-GRANT_ID בקובץ הוא המענק שהוחלט עליו, ולכן הן יסומנו "עודכן במערכות המעבדה"</span>
+  <ul class="plain">{% for n in v.lab_marked %}<li>{{ n }}</li>{% endfor %}</ul></div>
+{% endif %}
+
+{% if v.reconciled %}
+<details class="card" open><summary><b>החלטות מימון שייכללו ביתרת SAP ({{ v.counts.reconciled }})</b> <span class="muted">— הסכום שלהן יפסיק לרדת מהזמין, כי הדוח כבר מכסה את ההזמנה</span></summary>
+  <div class="tbl-wrap" style="max-height:260px;margin-top:8px"><table>
+    <tr><th>פריט</th><th>מענק</th><th class="num">סכום</th></tr>
+    {% for r in v.reconciled %}<tr><td class="ro">{{ r.item }}</td><td class="ro"><b>{{ r.grant }}</b></td><td class="ro num">{{ r.amount }}</td></tr>{% endfor %}
+  </table></div></details>
+{% endif %}
+
+{% if v.changed %}
+<details class="card" open><summary><b>שורות שישתנו ({{ v.counts.changed }})</b>
+  {% if v.fields %}<span class="muted">— {% for f, n in v.fields %}{{ f }} ({{ n }}){% if not forloop.last %} · {% endif %}{% endfor %}</span>{% endif %}</summary>
+  {% if v.status_moves %}<p class="muted" style="margin:8px 0 0">שינויי סטטוס: {% for a, b, n in v.status_moves %}<span dir="ltr">{{ a }} → {{ b }}</span> ({{ n }}){% if not forloop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+  <div class="tbl-wrap" style="max-height:420px;margin-top:8px"><table>
+    <tr><th>שורה</th><th>שדה</th><th>לפני</th><th>אחרי</th></tr>
+    {% for r in v.changed %}{% for f, a, b in r.changes %}<tr class="{% if forloop.first %}grp{% endif %}">
+      <td class="ro">{% if forloop.first %}{{ r.label }}{% endif %}</td><td class="ro">{{ f }}</td>
+      <td class="ro old">{{ a }}</td><td class="ro new">{{ b }}</td></tr>{% endfor %}{% endfor %}
+  </table></div>
+  {% if v.counts.changed > v.changed|length %}<p class="muted">מוצגות {{ v.changed|length }} הראשונות.</p>{% endif %}
+</details>
+{% endif %}
+
+{% if v.new %}
+<details class="card"><summary><b>{% if v.per_batch %}שורות חדשות בדוח{% else %}שורות חדשות{% endif %} ({{ v.counts.new }})</b></summary>
+  <ul class="plain cols">{% for r in v.new %}<li>{{ r }}</li>{% endfor %}</ul>
+  {% if v.counts.new > v.new|length %}<p class="muted">מוצגות {{ v.new|length }} הראשונות.</p>{% endif %}</details>
+{% endif %}
+{% if v.hidden %}
+<details class="card"><summary><b>{% if v.per_batch %}לא מופיעות בדוח החדש{% else %}יוסתרו{% endif %} ({{ v.counts.hidden }})</b> <span class="muted">— {% if v.per_batch %}הדוח החדש מחליף את הקודם{% else %}לא נמחקות; חוזרות אם יופיעו בקובץ הבא{% endif %}</span></summary>
+  <ul class="plain cols">{% for r in v.hidden %}<li>{{ r }}</li>{% endfor %}</ul>
+  {% if v.counts.hidden > v.hidden|length %}<p class="muted">מוצגות {{ v.hidden|length }} הראשונות.</p>{% endif %}</details>
+{% endif %}
+{% if v.reactivated %}
+<details class="card"><summary><b>יחזרו לפעילות ({{ v.counts.reactivated }})</b> <span class="muted">— הוסתרו בעבר ומופיעים שוב בקובץ</span></summary>
+  <ul class="plain cols">{% for r in v.reactivated %}<li>{{ r }}</li>{% endfor %}</ul></details>
+{% endif %}
+
+{% if not v.new and not v.changed and not v.hidden and not v.reactivated %}
+<div class="card">הקובץ זהה לנתונים הקיימים — אין מה לעדכן. {% if not v.counts.reconciled %}אפשר לבטל.{% endif %}</div>
+{% endif %}
+<script>
+  // one submit only: a double click on "אישור ועדכון" must not run the import twice
+  document.querySelectorAll('.preview-actions form').forEach(f => f.addEventListener('submit', () => {
+    document.querySelectorAll('.preview-actions button').forEach(b => b.disabled = true);
+    const btn = f.querySelector('button'); if(btn && f.action.endsWith('/confirm/')) btn.textContent = 'מעדכן…';
+  }));
+</script>
+{% endblock %}
