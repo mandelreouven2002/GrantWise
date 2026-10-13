@@ -1,14 +1,22 @@
 {% extends "budget/base.html" %}
-{% block title %}כניסה · LabFund{% endblock %}
+{% block title %}כניסה · GrantWise{% endblock %}
 {% block content %}
-<div class="card" style="max-width:380px;margin:60px auto">
-  <h1 style="margin-bottom:12px">כניסה</h1>
-  <form method="post">{% csrf_token %}
-    {% if form.errors %}<p class="tag bad">שם משתמש או סיסמה שגויים</p>{% endif %}
-    <p><label class="muted">שם משתמש</label><br><input class="f" name="username" autofocus style="width:100%"></p>
-    <p><label class="muted">סיסמה</label><br><input class="f" type="password" name="password" style="width:100%"></p>
+<section class="card login-card" aria-labelledby="login-title">
+  <h1 id="login-title">כניסה למערכת</h1>
+  <p class="login-description">התחברות לסביבת העבודה לניהול מענקים ותקציבים</p>
+  <form method="post">
+    {% csrf_token %}
+    {% if form.errors %}<ul class="msgs" role="alert"><li class="error">שם המשתמש או הסיסמה שגויים. יש לנסות שוב.</li></ul>{% endif %}
+    <div class="login-field">
+      <label for="username">שם משתמש</label>
+      <input id="username" class="f" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div class="login-field">
+      <label for="password">סיסמה</label>
+      <input id="password" class="f" type="password" name="password" autocomplete="current-password" required>
+    </div>
     <input type="hidden" name="next" value="{{ next }}">
-    <button class="btn">כניסה</button>
+    <button class="btn" type="submit">כניסה למערכת</button>
   </form>
-</div>
+</section>
 {% endblock %}
