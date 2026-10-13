@@ -1,9 +1,10 @@
+{% load static %}
 <!doctype html>
 <html lang="he" dir="rtl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}LabFund{% endblock %}</title>
+<title>{% block title %}GrantWise{% endblock %}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -124,29 +125,43 @@
   .seg small{display:block;color:var(--muted);margin-top:2px}
   @media (max-width:600px){main{padding:10px}.kpi{min-width:44%}}
 </style>
+<link rel="stylesheet" href="{% static 'budget/grantwise.css' %}">
 </head>
-<body>
-<header>
-  <a class="brand" href="{% url 'dashboard' %}" style="color:inherit;text-decoration:none">LabFund</a>
+<body class="{% if user.is_authenticated %}authenticated{% else %}anonymous{% endif %}">
+<header class="app-sidebar">
+  <a class="brand" href="{% url 'dashboard' %}" aria-label="GrantWise — דף הבית">
+    <span class="brand-mark" aria-hidden="true">G</span>
+    <span class="brand-copy"><strong>GrantWise</strong><small>ניהול מענקים ותקציבים</small></span>
+  </a>
   {% if user.is_authenticated %}
-  <nav>
+  <div class="nav-caption">סביבת עבודה</div>
+  <nav aria-label="ניווט ראשי">
     {% with u=request.resolver_match.url_name %}
-    <a href="{% url 'dashboard' %}" class="{% if u == 'dashboard' %}on{% endif %}">סקירה</a>
-    <a href="{% url 'orders' %}" class="{% if u == 'orders' %}on{% endif %}">הזמנות ודרישות</a>
-    <a href="{% url 'grants' %}" class="{% if u == 'grants' %}on{% endif %}">מענקים</a>
-    <a href="{% url 'resolve' %}" class="{% if u == 'resolve' %}on{% endif %}">המלצות</a>
-    <a href="{% url 'settings' %}" class="{% if u == 'settings' %}on{% endif %}" style="margin-inline-start:auto">הגדרות</a>
+    <a href="{% url 'dashboard' %}" class="{% if u == 'dashboard' %}on{% endif %}" {% if u == 'dashboard' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg><span>סקירה תקציבית</span></a>
+    <a href="{% url 'orders' %}" class="{% if u == 'orders' %}on{% endif %}" {% if u == 'orders' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3.5h6M9 9h6M9 13h6M9 17h4"/></svg><span>הזמנות ודרישות</span></a>
+    <a href="{% url 'grants' %}" class="{% if u == 'grants' %}on{% endif %}" {% if u == 'grants' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/></svg><span>מענקים</span></a>
+    <a href="{% url 'resolve' %}" class="{% if u == 'resolve' %}on{% endif %}" {% if u == 'resolve' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12l5 5 5-5M8 17V5"/><path d="M14 7h7M14 12h7M14 17h7"/></svg><span>המלצות מימון</span></a>
+    <a href="{% url 'settings' %}" class="{% if u == 'settings' %}on{% endif %}" {% if u == 'settings' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg><span>הגדרות</span></a>
     {% endwith %}
   </nav>
-  <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button>יציאה ({{ user.get_username }})</button></form>
+  <div class="sidebar-bottom">
+    <div class="sidebar-user">מחובר/ת כ־<strong>{{ user.get_username }}</strong></div>
+    <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button type="submit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3"/><path d="M12 3h6a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3h-6"/></svg><span>התנתקות</span></button></form>
+  </div>
   {% endif %}
 </header>
-<main>
+<div class="app-workspace">
+  <div class="workspace-topbar">
+    <div class="workspace-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 15h2M14 15h2"/></svg><span>מערכת ניהול תקציבי מחקר</span></div>
+    <span class="workspace-context">נתוני SAP ו־LabSuit · תמיכה בהחלטות מימון</span>
+  </div>
+<main id="main-content">
   {% if request.session.default_password %}<ul class="msgs"><li class="error">נכנסת עם סיסמת ברירת המחדל. כדאי לשנות אותה ב<a href="/settings/?tab=users">הגדרות → משתמשים</a>.</li></ul>{% endif %}
   {% if messages %}<ul class="msgs">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
   {% block content %}{% endblock %}
-  <footer class="foot">LabFund {{ LABFUND_VERSION }} · כלי עזר להחלטות מימון — לא מחליף את SAP או LabSuit</footer>
+  <footer class="foot">GrantWise {{ LABFUND_VERSION }} · מערכת לסיוע בהחלטות מימון — אינה מחליפה את SAP או LabSuit</footer>
 </main>
+</div>
 {% csrf_token %}
 <script>
 (function(){
