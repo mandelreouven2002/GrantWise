@@ -23,7 +23,7 @@ from . import resolve as resolver
 from .fx import MissingRate, rate_to_ils
 from .importers import run_import
 from .importers.preview import dry_run
-from .models import (Allocation, AutoFetchJob, PendingImport, SourceCredential, BudgetCategory, FundingAlias, FxRate, Grant, ImportBatch, InventoryItem, OrderRequest,
+from .models import (Allocation, AutoFetchJob, PendingImport, SourceCredential, BudgetCategory, FxRate, Grant, ImportBatch, InventoryItem, OrderRequest,
                      Project, ResolveRun, TrackedCurrency)
 from .tables import ADMIN_ONLY, TABLES, cell, choices_for, create_row, filtered, last_import, set_value
 
@@ -73,24 +73,15 @@ def _cell_with_choices(col, obj):
     return d
 
 
+# An order with one of these decisions is out of the orders page and the recommendations for good
+# (recycling rejects the decision, which is the only way back).
+DECIDED = [Allocation.Status.APPROVED, Allocation.Status.SUPERSEDED]
+
+
 def _awaiting_decision():
     """Approved in LabSuit, not ordered yet, and no funding decision approved here."""
     return (OrderRequest.objects.filter(is_current=True, status__in=resolver.OPEN_STATUSES)
-            .exclude(allocations__status=Allocation.Status.APPROVED).distinct())
-
-
-def _funding_labels(order_ids):
-    """{order_id: '2032917 · 132.26 EUR (ממתין ל-SAP)'} for approved / reconciled decisions."""
-    out = defaultdict(list)
-    for a in (Allocation.objects.filter(order_id__in=order_ids, grant__isnull=False,
-                                        status__in=[Allocation.Status.APPROVED, Allocation.Status.SUPERSEDED])
-              .select_related("grant")):
-        if a.status == Allocation.Status.SUPERSEDED:
-            state = "כלול ביתרת SAP"
-        else:
-            state = "עודכן במעבדה, ממתין ל-SAP" if a.lab_updated_at else "ממתין ל-SAP"
-        out[a.order_id].append(f"{a.grant_id} · {a.amount_grant_ccy:,.2f} {a.grant.currency} ({state})")
-    return {k: " + ".join(v) for k, v in out.items()}
+            .exclude(allocations__status__in=DECIDED).distinct())
 
 
 def _ils(amount, ccy):
@@ -168,10 +159,10 @@ def orders_view(request):
     g = request.GET
     years = [d.year for d in OrderRequest.objects.dates("date_requested", "year", order="DESC")]
     year = g.get("year", str(years[0]) if years else "")
-    # Orders with an approved funding decision wait in the recycle bin on the recommendations page
-    # until they are recycled back here (or SAP covers them).
+    # Orders with a funding decision are not listed here: they wait in the recycle bin on the recommendations
+    # page until marked "עודכן במערכות המעבדה" (then they disappear for good) or recycled back.
     qs = (OrderRequest.objects.filter(is_current=True).select_related("project", "category")
-          .exclude(allocations__status=Allocation.Status.APPROVED))
+          .exclude(allocations__status__in=DECIDED))
     if year and year != "all":
         qs = qs.filter(date_requested__year=int(year))
     if g.get("status"):
@@ -183,26 +174,17 @@ def orders_view(request):
     if g.get("pending") == "1":
         qs = qs.filter(pk__in=_awaiting_decision().values("pk"))
     qs = filtered(TABLES["orders"], qs, g).order_by("-date_requested", "-id")
-    aliases = FundingAlias.objects.order_by("-needs_review", "kind", "label")
     t = table_ctx("orders", qs, request)
-    labels = _funding_labels([r["pk"] for r in t["rows"]])
-    for r in t["rows"]:              # fill the calculated "funding decided in LabFund" column
-        for c in r["cells"]:
-            if c["col"].field == "funding":
-                c["value"] = labels.get(r["pk"], "")
     return render(request, "budget/orders.html", dict(
         t=t, total=qs.count(), years=years, year=year,
-        in_bin=(Allocation.objects.filter(status=Allocation.Status.APPROVED, order__is_current=True)
-                .values("order_id").distinct().count()),
-        aliases=table_ctx("aliases", aliases, paginate=False),
-        review=FundingAlias.objects.filter(needs_review=True).count()))
+        in_bin=(Allocation.objects.filter(status=Allocation.Status.APPROVED, lab_updated_at__isnull=True,
+                                          order__is_current=True).values("order_id").distinct().count())))
 
 
 def _resolve_params(request):
     p = request.GET
     submitted = "lookback" in p        # an unchecked checkbox sends nothing
     return dict(respect_labels=(p.get("labels") == "1") if submitted else False,
-                allow_split=(p.get("split") == "1") if submitted else False,
                 lookback_days=int(p.get("lookback") or 180))
 
 
@@ -242,10 +224,10 @@ def resolve_view(request):
         for o in result.needs_amount:
             rows.append(dict(order=o, state="noamount", lines=[], options=[], why_not=[], cells=_cells(o)))
         # Everything still open on the orders page is listed here, marked with why it gets no recommendation
-        # (orders already approved here are in the recycle bin instead).
-        in_bin = set(Allocation.objects.filter(status=Allocation.Status.APPROVED).values_list("order_id", flat=True))
+        # (orders already decided here are in the recycle bin, or gone once marked as updated).
+        decided = set(Allocation.objects.filter(status__in=DECIDED).values_list("order_id", flat=True))
         for o, why in result.skipped:
-            if o.pk not in in_bin:
+            if o.pk not in decided:
                 rows.append(dict(order=o, state="skipped", lines=[], options=[], why_not=[], note=why,
                                  cells=_cells(o)))
         for o in result.standing:
@@ -259,22 +241,23 @@ def resolve_view(request):
                 cats={k: float(v) for k, v in st.cats.items()}, extra={k: float(v) for k, v in st.extra.items()},
                 label=(g.sponsor or g.description)[:40], end=g.end_date.strftime("%d/%m/%Y") if g.end_date else "",
                 days=st.days_left)
-        rank = {"unfunded": 0, "split": 1, "ok": 1, "noamount": 2, "skipped": 3, "standing": 3}
+        rank = {"unfunded": 0, "ok": 1, "noamount": 2, "skipped": 3, "standing": 3}
         rows.sort(key=lambda r: (rank[r["state"]], -(r["order"].date_requested or date.min).toordinal()))
     payload["catNames"] = dict(BudgetCategory.objects.values_list("code", "name_he"))
 
     count = lambda *states: sum(1 for r in rows if r["state"] in states)  # noqa: E731
     return render(request, "budget/resolve.html", dict(
         result=result, error=error, rows=rows, bin=_recycle_bin(), params=params, payload=payload,
-        n_ready=count("ok", "split", "unfunded"), n_noamount=count("noamount"),
+        n_ready=count("ok", "unfunded"), n_noamount=count("noamount"),
         n_unfunded=count("unfunded"), n_skipped=count("skipped"), n_standing=count("standing")))
 
 
 def _recycle_bin():
-    """Approved decisions that SAP does not cover yet, one entry per order, with the recommendation's reason.
-    These orders are hidden from the orders page; recycling one sends it back there."""
+    """Approved decisions not yet marked "עודכן במערכות המעבדה", one entry per order, with the recommendation's
+    reason. These orders are hidden from the orders page; recycling one sends it back there, marking it
+    removes it from the system's lists while its amount stays deducted from the grant (until SAP covers it)."""
     groups = {}
-    lines = (Allocation.objects.filter(status=Allocation.Status.APPROVED)
+    lines = (Allocation.objects.filter(status=Allocation.Status.APPROVED, lab_updated_at__isnull=True)
              .select_related("order", "grant", "category").order_by("-decided_at", "id"))
     for a in lines:
         g = groups.setdefault(a.order_id, dict(order=a.order, lines=[], pk=a.pk, decided_by=a.decided_by,
@@ -290,22 +273,13 @@ def _recycle_bin():
     return list(groups.values())
 
 
-def _dec(v):
-    try:
-        return Decimal(str(v).replace(",", "").strip())
-    except Exception:  # noqa: BLE001
-        return None
-
-
 @login_required
 @require_POST
 def resolve_approve(request):
     decisions, edited = {}, set()
     for oid in request.POST.getlist("order"):
         oid = int(oid)
-        grants = request.POST.getlist(f"g_{oid}")
-        amounts = request.POST.getlist(f"a_{oid}")
-        decisions[oid] = [(g, _dec(a)) for g, a in zip(grants, amounts)]
+        decisions[oid] = request.POST.get(f"g_{oid}", "")      # one grant funds the whole order
         if request.POST.get(f"edited_{oid}") == "1":
             edited.add(oid)
     nxt = request.POST.get("next") or "resolve"
@@ -346,12 +320,13 @@ def allocation_lab_updated(request, pk):
     lines = Allocation.objects.filter(order=a.order, status=Allocation.Status.APPROVED)
     if a.lab_updated_at:
         lines.update(lab_updated_at=None, lab_updated_by="")
-        messages.success(request, f"הסימון בוטל: {a.order.item_name}")
+        messages.success(request, f"הסימון בוטל והחזיר לסל המחזור: {a.order.item_name}")
     else:
         lines.update(lab_updated_at=timezone.now(), lab_updated_by=request.user.get_username())
         n = resolver.reconcile()
         tail = " ההחלטה כבר כלולה ביתרת SAP האחרונה." if n else " הסכום נשאר שמור עד שדוח SAP יכסה את ההזמנה."
-        messages.success(request, f"סומן כעודכן במערכות המעבדה: {a.order.item_name}.{tail}")
+        messages.success(request, f"סומן כעודכן במערכות המעבדה והוסר מסל המחזור: {a.order.item_name}. "
+                                  f"הסכום נשאר מנוכה מהמענק.{tail}")
     return redirect(request.POST.get("next") or "resolve")
 
 

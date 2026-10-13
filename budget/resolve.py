@@ -2,7 +2,7 @@
 
 LabFund is a decision-support tool, not an ERP: the recommendation is computed in memory every time
 the page is opened, and nothing is written until the user approves. The user may edit the
-recommendation (choose other grants, split an order by hand); approval re-validates everything
+recommendation (choose another grant for an order); approval re-validates everything
 inside a locked transaction.
 
 Pipeline (compute)
@@ -14,12 +14,11 @@ Pipeline (compute)
                   not on a standing order, not already approved here, with an amount.
 3. eligibility  – hard rules (dates, cutoff, project links, category allowed, balance).
 4. Optimisation (PuLP 3.x + bundled CBC) over all candidates together.
-   Default — one grant per request (the lab funds a request by writing a single GRANT_ID):
+   One grant per request (the lab funds a request by writing a single GRANT_ID):
        min  Σ cost[o,g]·A_o·y[o,g] + Σ BIG·A_o·z_o        y, z ∈ {0,1}
        s.t. Σ_g y[o,g] + z_o = 1                          (one grant, or flagged unfunded)
             Σ_o∈c A_o·k[o,g]·y[o,g] ≤ avail[g,c]          (category balance, non-pooled grants)
             Σ_o   A_o·k[o,g]·y[o,g] ≤ avail_total[g]      (grant total balance)
-   With allow_split=True the same model is an LP over continuous ₪ amounts x[o,g] (x = A·y).
    A_o is in ₪; k converts ₪ to grant currency incl. FX safety margin.
    cost = 1 − w_u·urgency(expiry) + w_r·reserve − w_p·priority + w_fx·(currency mismatch)
 
@@ -110,7 +109,7 @@ class Plan:
         funded = [l for l in self.lines if l.grant]
         if len(funded) < len(self.lines):
             return "unfunded"
-        return "split" if len(funded) > 1 else "ok"
+        return "ok"
 
 
 @dataclass
@@ -160,7 +159,7 @@ def covered_by_sap(alloc, sap_as_of):
 def mark_written_in_labsuit():
     """The lab funds a request by writing its grant in LabSuit's GRANT_ID. When an imported order
     already carries the grant we decided on, mark the decision 'עודכן במערכות המעבדה' automatically.
-    Only single-grant decisions (a split can't be expressed by one GRANT_ID). Returns the count."""
+    Only single-grant decisions (one GRANT_ID can't express more). Returns the count."""
     n, now = 0, timezone.now()
     pending = (Allocation.objects.filter(status=Allocation.Status.APPROVED, lab_updated_at__isnull=True,
                                          grant__isnull=False).select_related("order"))
@@ -297,7 +296,7 @@ def to_grant_ccy(amount_ils, c, s, p):
 
 def collect(today, sap_as_of, p):
     buckets = {"standing": [], "needs_amount": [], "candidates": [], "skipped": []}
-    already = set(Allocation.objects.filter(status=Allocation.Status.APPROVED)
+    already = set(Allocation.objects.filter(status__in=[Allocation.Status.APPROVED, Allocation.Status.SUPERSEDED])
                   .values_list("order_id", flat=True))
     replay = p.get("replay_days")
     if replay:
@@ -323,7 +322,7 @@ def collect(today, sap_as_of, p):
             buckets["standing"].append(o)
             continue
         if o.id in already:
-            buckets["skipped"].append((o, "כבר אושרה כאן — מופיעה ב\"אושרו ועדיין לא כלולות ביתרת SAP\""))
+            buckets["skipped"].append((o, "כבר אושרה כאן"))
             continue
         if not o.amount_est:
             buckets["needs_amount"].append(o)
@@ -414,25 +413,18 @@ def compute(today=None, sap_as_of=None, **overrides):
                 c.fixed_grant = None
         options[i], why_not[i] = opts, why
 
-    # Optimisation. Default: each request from exactly one grant (binary y, x = A·y).
-    # allow_split: x is a continuous ₪ amount, so a request may be spread over several grants.
-    split = bool(p.get("allow_split"))
+    # Optimisation: each request is funded in full from exactly one grant (binary y, x = A·y);
+    # a request that no single grant can cover is flagged unfunded (z = 1).
     prob = pulp.LpProblem("resolve", pulp.LpMinimize)
     x, k, costs = {}, {}, {}
     A = {i: float(c.amount_ils) for i, c in enumerate(cands)}
-    if split:
-        u = {i: pulp.LpVariable(f"u_{i}", lowBound=0) for i in A}
-    else:
-        z = {i: pulp.LpVariable(f"z_{i}", cat="Binary") for i in A}
-        u = {i: A[i] * z[i] for i in A}
+    z = {i: pulp.LpVariable(f"z_{i}", cat="Binary") for i in A}
+    u = {i: A[i] * z[i] for i in A}
     for i, c in enumerate(cands):
         usable = options[i][:1] if c.fixed_grant else options[i]
         for o in usable:
             num = o.state.grant.number
-            if split:
-                x[i, num] = pulp.LpVariable(f"x_{i}_{num}", lowBound=0)
-            else:
-                x[i, num] = A[i] * pulp.LpVariable(f"y_{i}_{num}", cat="Binary")
+            x[i, num] = A[i] * pulp.LpVariable(f"y_{i}_{num}", cat="Binary")
             k[i, num] = float((1 + margin_for(c, o.state, p)) / o.state.rate)
             costs[i, num] = o.cost
     prob += pulp.lpSum(costs[key] * x[key] for key in x) + pulp.lpSum(BIG * u[i] for i in u)
@@ -469,13 +461,8 @@ def compute(today=None, sap_as_of=None, **overrides):
             used[num] += amt_g
         short = Decimal(str(pulp.value(u[i]) or 0)).quantize(Q) if cands else Decimal("0")
         if short >= Decimal("0.01"):
-            if not options[i]:
-                text = "אין מענק כשיר להזמנה הזו."
-            elif split:
-                text = "המענקים הכשירים לא מספיקים לסכום המלא — היתרות שלהם כבר מנוצלות בהמלצה."
-            else:
-                text = ("אין מענק אחד שהיתרה שלו מכסה את כל הסכום (אחרי שאר ההמלצות). "
-                        "אפשר לפצל ידנית עם \"+ פיצול / מענק נוסף\", או לסמן \"לאפשר פיצול\" למעלה.")
+            text = ("אין מענק כשיר להזמנה הזו." if not options[i] else
+                    "אין מענק אחד שהיתרה שלו מכסה את כל הסכום (אחרי שאר ההמלצות).")
             lines.append(Line(grant=None, amount_orig=(short / c.rate).quantize(Q), amount_ils=short, reason=text))
         plans.append(Plan(cand=c, lines=lines, options=options[i], why_not=why_not[i]))
 
@@ -506,7 +493,7 @@ class ApprovalError(Exception):
 
 
 def approve_plans(decisions, user="", today=None, edited=None):
-    """Approve the user's decisions: {order_id: [(grant_number, amount_in_order_currency), ...]}.
+    """Approve the user's decisions: {order_id: grant_number} — each order is funded in full from one grant.
 
     Everything is re-validated against fresh balances inside one transaction with the grants locked
     (SELECT … FOR UPDATE on Postgres), so concurrent approvals cannot overdraw a grant. All or nothing.
@@ -516,7 +503,7 @@ def approve_plans(decisions, user="", today=None, edited=None):
     today = today or timezone.localdate()
     edited = edited or set()
     cat_names = dict(BudgetCategory.objects.values_list("code", "name_he"))
-    nums = {n for lines in decisions.values() for n, _ in lines if n}
+    nums = {n for n in decisions.values() if n}
     with transaction.atomic():
         grants = list(Grant.objects.select_for_update().filter(number__in=nums).select_related("last_batch"))
         sap = ImportBatch.latest(ImportBatch.Source.SAP_GRANTS)
@@ -530,7 +517,7 @@ def approve_plans(decisions, user="", today=None, edited=None):
         approved_already = set(Allocation.objects.filter(order_id__in=decisions.keys(),
                                                          status=Allocation.Status.APPROVED)
                                .values_list("order_id", flat=True))
-        for oid, lines in decisions.items():
+        for oid, num in decisions.items():
             o = orders.get(oid)
             if o is None:
                 errors.append(f"הזמנה {oid} לא נמצאה")
@@ -542,53 +529,43 @@ def approve_plans(decisions, user="", today=None, edited=None):
             if not o.amount_est:
                 errors.append(f"{name}: אין סכום")
                 continue
-            lines = [(n, a) for n, a in lines if n and a and a > 0]
-            if not lines:
+            if not num:
                 errors.append(f"{name}: לא נבחר מענק")
-                continue
-            total = sum(a for _, a in lines)
-            if abs(total - o.amount_est) > TOL:
-                errors.append(f"{name}: סכום החלוקה ({total:,.2f}) שונה מסכום ההזמנה ({o.amount_est:,.2f} "
-                              f"{o.amount_currency})")
                 continue
             try:
                 c = make_candidate(o, today)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{name}: {e}")
                 continue
-            for num, amount in lines:
-                s = states.get(num)
-                if s is None:
-                    errors.append(f"{name}: המענק {num} לא פעיל או חסר לו שער חליפין")
-                    continue
-                ok, reason = eligible(c, s, today)
-                if not ok:
-                    errors.append(f"{name}: המענק {num} אינו כשיר — {reason}")
-                    continue
-                ils = (amount * c.rate).quantize(Q)
-                amt_g = to_grant_ccy(ils, c, s, p)
-                left_total = s.total - used_total[num] - amt_g
-                if left_total < -TOL:
-                    errors.append(f"{name}: חריגה מהיתרה של {num} — זמין {s.total - used_total[num]:,.2f}, "
-                                  f"מבוקש {amt_g:,.2f} {s.grant.currency}")
-                    continue
-                if not s.pooled:
-                    left_cat = s.cat_cap(c.category) - used_cat[num, c.category] - amt_g
-                    if left_cat < -TOL:
-                        errors.append(f"{name}: חריגה בסעיף {cat_names.get(c.category, c.category)} של {num} — "
-                                      f"זמין {s.cat_cap(c.category) - used_cat[num, c.category]:,.2f}, "
-                                      f"מבוקש {amt_g:,.2f} {s.grant.currency}")
-                        continue
-                urg = cost(c, s, p)[1]
-                reason_txt = explain(c, s, s.cat_cap(c.category) - used_cat[num, c.category], urg, amt_g, cat_names)
-                used_total[num] += amt_g
-                used_cat[num, c.category] += amt_g
-                new_allocs.append(Allocation(
-                    order=o, grant=s.grant, category_id=c.category, amount_orig=amount.quantize(Q),
-                    currency_orig=c.currency, amount_ils=ils, amount_grant_ccy=amt_g,
-                    fx_rate=(c.rate * (1 + margin_for(c, s, p)) / s.rate).quantize(R6), fx_date=today,
-                    status=Allocation.Status.APPROVED, decided_by=user, decided_at=timezone.now(),
-                    reason=("נערך ידנית · " if oid in edited else "") + reason_txt))
+            s = states.get(num)
+            if s is None:
+                errors.append(f"{name}: המענק {num} לא פעיל או חסר לו שער חליפין")
+                continue
+            ok, reason = eligible(c, s, today)
+            if not ok:
+                errors.append(f"{name}: המענק {num} אינו כשיר — {reason}")
+                continue
+            ils = (o.amount_est * c.rate).quantize(Q)
+            amt_g = to_grant_ccy(ils, c, s, p)
+            if s.total - used_total[num] - amt_g < -TOL:
+                errors.append(f"{name}: חריגה מהיתרה של {num} — זמין {s.total - used_total[num]:,.2f}, "
+                              f"מבוקש {amt_g:,.2f} {s.grant.currency}")
+                continue
+            if not s.pooled and s.cat_cap(c.category) - used_cat[num, c.category] - amt_g < -TOL:
+                errors.append(f"{name}: חריגה בסעיף {cat_names.get(c.category, c.category)} של {num} — "
+                              f"זמין {s.cat_cap(c.category) - used_cat[num, c.category]:,.2f}, "
+                              f"מבוקש {amt_g:,.2f} {s.grant.currency}")
+                continue
+            urg = cost(c, s, p)[1]
+            reason_txt = explain(c, s, s.cat_cap(c.category) - used_cat[num, c.category], urg, amt_g, cat_names)
+            used_total[num] += amt_g
+            used_cat[num, c.category] += amt_g
+            new_allocs.append(Allocation(
+                order=o, grant=s.grant, category_id=c.category, amount_orig=o.amount_est.quantize(Q),
+                currency_orig=c.currency, amount_ils=ils, amount_grant_ccy=amt_g,
+                fx_rate=(c.rate * (1 + margin_for(c, s, p)) / s.rate).quantize(R6), fx_date=today,
+                status=Allocation.Status.APPROVED, decided_by=user, decided_at=timezone.now(),
+                reason=("נבחר ידנית · " if oid in edited else "") + reason_txt))
         if errors:
             raise ApprovalError(errors)
         run = ResolveRun.objects.create(run_date=today, created_by=user, sap_batch=sap,
