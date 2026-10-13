@@ -267,8 +267,68 @@ class DashboardTests(TestCase):
         # approving through the page posts the (possibly edited) lines
         r = self.client.post("/resolve/approve/", {"order": [o.pk], f"g_{o.pk}": ["A"], f"a_{o.pk}": ["500.00"]})
         self.assertEqual(Allocation.objects.filter(order=o, status="approved").count(), 1)
+        # the approved order leaves the orders page and waits in the recycle bin on the recommendations page
         orders_page = self.client.get("/orders/?year=all")
-        self.assertContains(orders_page, "ממתין ל-SAP")             # the decision shows on the orders dashboard
+        self.assertNotIn(o, [r["obj"] for r in orders_page.context["t"]["rows"]])
+        self.assertContains(orders_page, "סל המחזור")
+        bin_ = self.client.get("/resolve/").context["bin"]
+        self.assertEqual([g["order"] for g in bin_], [o])
+        self.assertTrue(bin_[0]["lines"][0].reason)                    # the recommendation's reason is kept
+
+    def _approved_order(self, amount="500", currency="ILS"):
+        self.post_json("/api/grants/A/", {"field": "line:MATERIAL", "value": "1000"})
+        o = OrderRequest.objects.create(natural_key="bin-1", item_name="bin item", status="approved",
+                                        amount_est=Decimal(amount), amount_currency=currency, category_id="MATERIAL",
+                                        date_requested=timezone_today())
+        self.client.post("/resolve/approve/", {"order": [o.pk], f"g_{o.pk}": ["A"], f"a_{o.pk}": [amount]})
+        self.assertEqual(Allocation.objects.filter(order=o, status="approved").count(), 1)
+        return o
+
+    def test_recycle_returns_order_to_orders_page_and_recommendations(self):
+        o = self._approved_order()
+        a = Allocation.objects.get(order=o)
+        self.assertNotIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
+        self.assertNotIn(o.pk, [r["order"].pk for r in self.client.get("/resolve/").context["rows"]])
+        r = self.client.post(f"/resolve/recycle/{a.pk}/")
+        self.assertEqual(r.status_code, 302)
+        self.assertFalse(Allocation.objects.filter(order=o, status="approved").exists())
+        self.assertIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
+        page = self.client.get("/resolve/")
+        self.assertEqual(page.context["bin"], [])
+        row = next(r for r in page.context["rows"] if r["order"].pk == o.pk)
+        self.assertEqual(row["lines"][0].grant.number, "A")            # recommended again, from today's balances
+
+    def test_recycled_order_is_priced_at_todays_rate(self):
+        o = self._approved_order(amount="100", currency="EUR")
+        a = Allocation.objects.get(order=o)
+        self.assertEqual(a.amount_ils, Decimal("344.22"))
+        FxRate.objects.update_or_create(date=TODAY, currency="EUR", defaults={"rate_to_ils": Decimal("4.0000")})
+        g = self.client.get("/resolve/").context["bin"][0]
+        self.assertEqual((g["then"], g["now"], g["drift"]), (Decimal("344.22"), Decimal("400.0000"), True))
+        self.client.post(f"/resolve/recycle/{a.pk}/")
+        page = self.client.get("/resolve/")
+        row = next(r for r in page.context["rows"] if r["order"].pk == o.pk)
+        self.assertEqual(row["lines"][0].amount_ils, Decimal("400.00"))   # frozen rate dropped, repriced
+        self.assertEqual(Allocation.objects.get(pk=a.pk).status, "rejected")
+
+    def test_every_open_order_is_listed_with_a_marking(self):
+        self.post_json("/api/grants/A/", {"field": "line:MATERIAL", "value": "1000"})
+        kw = dict(status="approved", amount_est=Decimal("10"), amount_currency="ILS", category_id="MATERIAL")
+        ok = OrderRequest.objects.create(natural_key="k-ok", item_name="ok", date_requested=timezone_today(), **kw)
+        old = OrderRequest.objects.create(natural_key="k-old", item_name="old", date_requested=date(2020, 1, 1), **kw)
+        po = OrderRequest.objects.create(natural_key="k-po", item_name="has po", po_number="5400000001",
+                                         date_ordered=date(2026, 10, 1), date_requested=timezone_today(), **kw)
+        st = OrderRequest.objects.create(natural_key="k-st", item_name="standing", grant_label="Standing X",
+                                         date_requested=timezone_today(), **kw)
+        FundingAlias.objects.create(label="Standing X", kind="standing")
+        page = self.client.get("/resolve/")
+        states = {r["order"].pk: r["state"] for r in page.context["rows"]}
+        self.assertEqual(states[ok.pk], "ok")
+        self.assertEqual((states[old.pk], states[po.pk], states[st.pk]), ("skipped", "skipped", "standing"))
+        self.assertContains(page, "לא בחישוב")
+        # nothing from the orders page is missing from the recommendations
+        on_orders_page = {r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]}
+        self.assertTrue(on_orders_page <= set(states))
 
 
     def test_project_select_and_dash_for_empty(self):

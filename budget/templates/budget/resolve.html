@@ -19,8 +19,9 @@
   <div class="kpi"><b>{{ n_ready }}</b><span>עם המלצה</span></div>
   <div class="kpi"><b>{{ n_noamount }}</b><span>חסר סכום</span></div>
   <div class="kpi"><b>{{ n_unfunded }}</b><span>אין מקור מספיק</span></div>
-  <div class="kpi"><b>{{ result.standing|length }}</b><span>על הזמנה עומדת</span></div>
-  {% if result.skipped %}<div class="kpi"><b>{{ result.skipped|length }}</b><span>אושרו אבל לא בחישוב (פירוט למטה)</span></div>{% endif %}
+  <div class="kpi"><b>{{ n_standing }}</b><span>על הזמנה עומדת</span></div>
+  {% if n_skipped %}<div class="kpi"><b>{{ n_skipped }}</b><span>לא בחישוב (הסיבה בשורה)</span></div>{% endif %}
+  <div class="kpi"><b>{{ bin|length }}</b><span>בסל המחזור</span></div>
   <div class="kpi"><span>יתרות SAP מ-{{ result.sap_as_of|date:"d/m/Y" }}<br>חושב {% now "d/m/Y H:i" %}</span></div>
 </div>
 
@@ -60,7 +61,7 @@
   <tbody>
   {% for r in rows %}
   <tr data-pk="{{ r.order.id }}" data-reload data-state="{{ r.state }}" class="plan-row">
-    <td class="chk">{% if r.state != "noamount" %}<input type="checkbox" class="pick" name="order" value="{{ r.order.id }}" {% if r.state != "unfunded" %}checked{% endif %}>
+    <td class="chk">{% if r.state != "noamount" and r.state != "skipped" and r.state != "standing" %}<input type="checkbox" class="pick" name="order" value="{{ r.order.id }}" {% if r.state != "unfunded" %}checked{% endif %}>
       <input type="hidden" name="edited_{{ r.order.id }}" value="0" class="edited-flag">{% endif %}</td>
     <td class="ro" style="white-space:normal;min-width:220px"><b>{{ r.order.item_name|truncatechars:70 }}</b>
       <div class="reason">{{ r.order.supplier }} · {{ r.order.requested_by }} · {{ r.order.date_requested|date:"d/m/Y" }}</div></td>
@@ -72,6 +73,10 @@
     <td class="ro" style="white-space:normal">
       {% if r.state == "noamount" %}
         <span class="tag warn">חסר סכום</span> <span class="reason">הזינו סכום משוער בעמודת "סכום" — ההמלצה תחושב מיד</span>
+      {% elif r.state == "skipped" %}
+        <span class="tag warn">לא בחישוב</span> <span class="reason">{{ r.note }}</span>
+      {% elif r.state == "standing" %}
+        <span class="tag info">הזמנה עומדת</span> <span class="reason">{{ r.note }}</span>
       {% elif not r.options %}
         <span class="tag bad">אין מענק כשיר</span>
         <div class="reason">{% for num, why in r.why_not %}{{ num }}: {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>
@@ -111,38 +116,31 @@
     <td class="ro status" style="white-space:normal;min-width:110px"></td>
   </tr>
   {% empty %}
-  <tr><td class="ro muted" colspan="9">אין כרגע בקשות שאושרו ועוד לא הוזמנו.</td></tr>
+  <tr><td class="ro muted" colspan="9">אין כרגע בקשות פתוחות ב"הזמנות ודרישות".</td></tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
 </form>
 
-{% if result.skipped %}
-<details class="card" style="margin-top:14px"><summary><b>אושרו אבל לא בחישוב ({{ result.skipped|length }})</b> <span class="muted">— ולמה</span></summary>
-  <div class="tbl-wrap" style="margin-top:10px;max-height:50vh"><table>
-    <tr><th>פריט</th><th>LabSuit</th><th>סיבה</th></tr>
-    {% for o, reason in result.skipped %}<tr><td class="ro"><a href="{% url 'orders' %}?year=all&q={{ o.item_name|urlencode }}">{{ o.item_name|truncatechars:60 }}</a></td><td class="ro">{{ o.grant_label|default:"—" }}</td><td class="ro reason">{{ reason }}</td></tr>{% endfor %}
-  </table></div></details>
-{% endif %}
-{% if result.standing %}
-<details class="card"><summary><b>על הזמנה עומדת / שמור-מכור ({{ result.standing|length }})</b> <span class="muted">— כבר מחויבות ב-SAP, לא דורשות החלטה</span></summary>
-  <ul>{% for o in result.standing %}<li>{{ o.item_name }} <span class="muted">({{ o.grant_label }})</span></li>{% endfor %}</ul></details>
-{% endif %}
 {% endif %}
 
-<h2>אושרו ועדיין לא כלולות ביתרת SAP <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הסכומים כאן יורדים מהזמין עד שדוח SAP יכסה את ההזמנה: דוח שתאריכו מאוחר מתאריך ההזמנה ב-LabSuit, או מהיום שסימנת "עודכן במערכות המעבדה" אם ל-LabSuit אין תאריך. SAP מייצא רק יתרות, לכן זו הסקה לפי תאריכים, והזמין הוא הערכה שמרנית.<br><br>"עודכן במערכות המעבדה" = עדכנת את ה-GRANT_ID ב-LabSuit או את ההזמנה ב-SAP. הסימון לא משחרר את הסכום בעצמו.</span></span></h2>
+<h2 id="bin">♻ סל מחזור <span class="muted" style="font-weight:400">— אושרו וממתינים ל-SAP ({{ bin|length }})</span> <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הזמנות שאושרו כאן יוצאות מ"הזמנות ודרישות" ומחכות בסל הזה, עם הנימוק של ההמלצה. הסכומים שלהן יורדים מהזמין עד שדוח SAP יכסה את ההזמנה: דוח שתאריכו מאוחר מתאריך ההזמנה ב-LabSuit, או מהיום שסימנת "עודכן במערכות המעבדה" אם ל-LabSuit אין תאריך. SAP מייצא רק יתרות, לכן זו הסקה לפי תאריכים, והזמין הוא הערכה שמרנית.<br><br>"עודכן במערכות המעבדה" = עדכנת את ה-GRANT_ID ב-LabSuit או את ההזמנה ב-SAP. הסימון לא משחרר את הסכום בעצמו.<br><br>"♻ מחזור" מבטל את האישור ומחזיר את ההזמנה ל"הזמנות ודרישות" כבקשה פתוחה: ההמלצה תחושב מחדש לפי השערים והיתרות של היום (כולל מטבע ששערו השתנה).</span></span></h2>
 <div class="tbl-wrap"><table>
-  <tr><th>פריט</th><th>מענק</th><th class="num">סכום בהזמנה</th><th class="num">במטבע המענק</th><th>אושר</th><th>במערכות המעבדה</th><th>נימוק</th><th></th></tr>
-  {% for a in approved %}<tr><td class="ro">{{ a.order.item_name|truncatechars:50 }}</td><td class="ro"><b>{{ a.grant_id }}</b></td>
-    <td class="ro num">{{ a.amount_orig|money:2 }} {{ a.currency_orig }}</td>
-    <td class="ro num">{{ a.amount_grant_ccy|money:2 }} {{ a.grant.currency }}</td><td class="ro">{{ a.decided_by }} · {{ a.decided_at|date:"d/m/Y H:i" }}</td>
-    <td class="ro"><form method="post" action="{% url 'allocation_lab_updated' a.pk %}" class="inline">{% csrf_token %}
-      {% if a.lab_updated_at %}<span class="tag good">עודכן · {{ a.lab_updated_at|date:"d/m/Y" }}</span> <button class="btn link">ביטול סימון</button>
+  <tr><th>פריט</th><th>מימון שאושר</th><th>נימוק ההמלצה</th><th class="num">≈ ₪</th><th>אושר</th><th>במערכות המעבדה</th><th></th></tr>
+  {% for g in bin %}<tr>
+    <td class="ro" style="white-space:normal;min-width:200px"><b>{{ g.order.item_name|truncatechars:60 }}</b>
+      <div class="reason">{{ g.order.supplier }} · {{ g.order.requested_by }} · {{ g.order.date_requested|date:"d/m/Y" }}</div>
+      <div class="reason">{{ g.order.amount_est|money:2 }} {{ g.order.amount_currency }}</div></td>
+    <td class="ro" style="white-space:normal">{% for a in g.lines %}<div><b>{{ a.grant_id }}</b> · {{ a.amount_grant_ccy|money:2 }} {{ a.grant.currency }}{% if g.lines|length > 1 %} <span class="muted">({{ a.amount_orig|money:2 }} {{ a.currency_orig }})</span>{% endif %}</div>{% endfor %}</td>
+    <td class="ro reason" style="white-space:normal;min-width:260px">{% for a in g.lines %}<div>{% if g.lines|length > 1 %}<b>{{ a.grant_id }}:</b> {% endif %}{{ a.reason|default:"—" }}</div>{% endfor %}</td>
+    <td class="ro num">{{ g.then|money:0 }}{% if g.drift %}<div class="reason"><span class="tag warn">השתנה</span> היום ≈ {{ g.now|money:0 }}</div>{% endif %}</td>
+    <td class="ro">{{ g.decided_by }} · {{ g.decided_at|date:"d/m/Y H:i" }}</td>
+    <td class="ro"><form method="post" action="{% url 'allocation_lab_updated' g.pk %}" class="inline">{% csrf_token %}
+      {% if g.lab_updated_at %}<span class="tag good">עודכן · {{ g.lab_updated_at|date:"d/m/Y" }}</span> <button class="btn link">ביטול סימון</button>
       {% else %}<button class="btn small ghost">עודכן במערכות המעבדה</button>{% endif %}</form></td>
-    <td class="ro reason">{{ a.reason|truncatechars:120 }}</td>
-    <td><form method="post" action="{% url 'allocation_cancel' a.pk %}">{% csrf_token %}<button class="btn link">ביטול אישור</button></form></td></tr>
-  {% empty %}<tr><td class="ro muted" colspan="8">אין</td></tr>{% endfor %}
+    <td><form method="post" action="{% url 'allocation_recycle' g.pk %}" class="inline"{% if g.lab_updated_at %} onsubmit="return confirm('סימנת שההזמנה כבר עודכנה ב-LabSuit / SAP. מחזור ישחרר את הסכום ויחזיר אותה להמלצות — צריך יהיה לבטל גם שם. להמשיך?')"{% endif %}>{% csrf_token %}<button class="btn small" title="ביטול האישור והחזרה להזמנות ודרישות">♻ מחזור</button></form></td></tr>
+  {% empty %}<tr><td class="ro muted" colspan="7">הסל ריק — הזמנות שיאושרו יופיעו כאן.</td></tr>{% endfor %}
 </table></div>
 
 {{ payload|json_script:"resolve-data" }}

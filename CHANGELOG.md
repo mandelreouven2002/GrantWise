@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 — 2026-10-13
+- **Recycle bin (סל מחזור):** approving recommendations moves those orders out of "הזמנות ודרישות" and into a recycle bin at the bottom of the recommendations page. Each entry shows the funding that was approved, the full reason for the recommendation, the ₪ value at approval (and today's value when the rate or amount has moved), and who/when. "♻ מחזור" drops the decision and sends the order back to the orders page as an open request; the next recommendation prices it at today's exchange rate and balances. The bin holds approved decisions SAP does not cover yet; once SAP covers one it returns to the orders page as a normal order.
+- The orders page shows a banner with the number of orders waiting in the bin.
+- **Every open request on the orders page is listed in the recommendations table.** Requests that get no recommendation (too old, already have a PO, on a standing order) are rows marked with the reason instead of sitting in collapsed lists below.
+- `resolve/cancel/<pk>/` (allocation_cancel) is replaced by `resolve/recycle/<pk>/` (allocation_recycle).
+
 ## 0.6.0 — 2026-10-13
 - Scope narrowed to orders, grants and recommendations: the inventory and budget-vs-actual dashboards are removed (their models and CLI importers stay; old inventory prices still fill missing order amounts).
 - The Merge preview warns about orders still "approved" in LabFund that are missing from the file (with an approved-only export: their status probably changed in LabSuit).
