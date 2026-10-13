@@ -102,7 +102,41 @@ def _ils(amount, ccy):
 
 
 # --------------------------------------------------------------------------- dashboards
+@login_required
+def dashboard_view(request):
+    grants = Grant.objects.filter(
+        is_active=True
+    ).prefetch_related(
+        "lines__category"
+    )
 
+    dashboard_grants = []
+
+    for grant in grants:
+        categories = []
+
+        for line in grant.current_lines():
+            categories.append({
+                "name": line.category.name_he,
+                "balance": line.balance,
+            })
+
+        dashboard_grants.append({
+            "number": grant.number,
+            "sponsor": grant.sponsor,
+            "currency": grant.currency,
+            "balance": grant.balance_total,
+            "categories": categories,
+        })
+
+    return render(
+        request,
+        "budget/dashboard.html",
+        {
+            "grants": dashboard_grants,
+            "active_grants": len(dashboard_grants),
+        }
+    )
 @login_required
 def grants_view(request):
     today = timezone.localdate()
