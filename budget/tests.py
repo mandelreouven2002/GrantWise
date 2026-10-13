@@ -60,30 +60,29 @@ class ResolveTests(TestCase):
     def grants_of(self, result, order):
         return {l.grant.number for l in self.plan_of(result, order).lines if l.grant}
 
-    def test_one_grant_per_request_by_default(self):
+    def test_one_grant_per_request(self):
         o1, o2 = self.order("1000"), self.order("5000")   # A (≈1,000 EUR) can't hold both
         r = resolve.compute(today=TODAY)
         for o in (o1, o2):
-            self.assertEqual(len(self.plan_of(r, o).lines), 1)                  # never split
+            self.assertEqual(len(self.plan_of(r, o).lines), 1)                  # one grant, in full
         self.assertEqual(self.grants_of(r, o1), {"A"})                         # small one → expiring grant
         self.assertEqual(self.grants_of(r, o2), {"L"})
 
-    def test_too_big_for_any_single_grant_is_flagged_unless_split_allowed(self):
+    def test_too_big_for_any_single_grant_is_flagged_unfunded(self):
         GrantRule.objects.create(grant=self.reserve, category_id="MATERIAL", allowed=False)
-        o = self.order("52000")       # L holds 50,000; A ≈ 3,300 ₪ — only a split covers it
-        self.assertEqual(self.plan_of(resolve.compute(today=TODAY), o).state, "unfunded")
-        plan = self.plan_of(resolve.compute(today=TODAY, allow_split=True), o)
-        self.assertEqual((plan.state, self.grants_of(resolve.compute(today=TODAY, allow_split=True), o)),
-                         ("split", {"A", "L"}))
+        o = self.order("52000")       # L holds 50,000; A ≈ 3,300 ₪ — no single grant covers it
+        plan = self.plan_of(resolve.compute(today=TODAY), o)
+        self.assertEqual(plan.state, "unfunded")
+        self.assertEqual([l.grant for l in plan.lines], [None])      # nothing is partly funded
 
-    def test_expiring_grant_first_then_spill_over(self):
+    def test_expiring_grant_first_reserve_last(self):
         self.order("1000")
-        self.order("5000")            # A cannot hold everything → split / spill to L
-        r = resolve.compute(today=TODAY, allow_split=True)
+        self.order("5000")            # A cannot hold both → the second one goes to L
+        r = resolve.compute(today=TODAY)
         lines = [l for p in r.plans for l in p.lines]
         self.assertTrue(all(l.grant for l in lines), "everything funded")
         used_a = sum(l.amount_grant for l in lines if l.grant.number == "A")
-        self.assertAlmostEqual(float(used_a), 1000, delta=1)          # expiring grant used to the end
+        self.assertAlmostEqual(float(used_a), 1000 * 1.03 / 3.4422, delta=0.1)   # the 1,000 ₪ request + FX margin
         self.assertTrue(any(l.grant.number == "L" for l in lines))
         self.assertFalse(any(l.grant.number == "R" for l in lines), "reserve should be the last resort")
 
@@ -127,7 +126,7 @@ class ResolveTests(TestCase):
     def test_approve_recommendation_then_reconcile_on_import(self):
         o = self.order("2000")
         r = resolve.compute(today=TODAY)
-        decision = {o.pk: [(l.grant.number, l.amount_orig) for l in self.plan_of(r, o).lines]}
+        decision = {o.pk: self.plan_of(r, o).lines[0].grant.number}
         resolve.approve_plans(decision, user="u", today=TODAY)
         used = sum(a.amount_grant_ccy for a in Allocation.objects.filter(status="approved", grant_id="A"))
         self.assertEqual(resolve.grant_states(TODAY, TODAY)["A"].total, Decimal("1000") - used)
@@ -141,36 +140,30 @@ class ResolveTests(TestCase):
         self.assertEqual(resolve.reconcile(TODAY), Allocation.objects.filter(order=o).count())
         self.assertFalse(Allocation.objects.filter(status="approved").exists())
 
-    def test_manual_split_is_approved(self):
-        o = self.order("1000")
-        resolve.approve_plans({o.pk: [("L", Decimal("600")), ("A", Decimal("400"))]}, today=TODAY)
-        got = {a.grant_id: a.amount_orig for a in Allocation.objects.filter(order=o)}
-        self.assertEqual(got, {"L": Decimal("600"), "A": Decimal("400")})
-
-    def test_ineligible_or_wrong_total_is_rejected_and_nothing_saved(self):
+    def test_ineligible_grant_is_rejected_and_nothing_saved(self):
         o = self.order("1000")
         GrantRule.objects.create(grant=self.later, category_id="MATERIAL", allowed=False)
         with self.assertRaises(resolve.ApprovalError) as e:
-            resolve.approve_plans({o.pk: [("L", Decimal("1000"))]}, today=TODAY)
+            resolve.approve_plans({o.pk: "L"}, today=TODAY)
         self.assertIn("אינו כשיר", " ".join(e.exception.errors))
         with self.assertRaises(resolve.ApprovalError):
-            resolve.approve_plans({o.pk: [("A", Decimal("10"))]}, today=TODAY)     # sum ≠ order amount
+            resolve.approve_plans({o.pk: ""}, today=TODAY)                          # no grant chosen
         self.assertEqual(Allocation.objects.count(), 0)
 
     def test_overdraw_rejected_even_across_requests(self):
         o1, o2 = self.order("3000"), self.order("3000")      # each ≈ 898 EUR in A, together > 1000
         with self.assertRaises(resolve.ApprovalError) as e:
-            resolve.approve_plans({o1.pk: [("A", Decimal("3000"))], o2.pk: [("A", Decimal("3000"))]}, today=TODAY)
+            resolve.approve_plans({o1.pk: "A", o2.pk: "A"}, today=TODAY)
         self.assertIn("חריגה", " ".join(e.exception.errors))
         self.assertEqual(Allocation.objects.count(), 0)
         # sequential approvals: the second one sees the first and is refused
-        resolve.approve_plans({o1.pk: [("A", Decimal("3000"))]}, today=TODAY)
+        resolve.approve_plans({o1.pk: "A"}, today=TODAY)
         with self.assertRaises(resolve.ApprovalError):
-            resolve.approve_plans({o2.pk: [("A", Decimal("3000"))]}, today=TODAY)
+            resolve.approve_plans({o2.pk: "A"}, today=TODAY)
 
     def test_po_without_date_stays_reserved(self):
         o = self.order("2000")
-        resolve.approve_plans({o.pk: [("L", Decimal("2000"))]}, today=TODAY)
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
         o.po_number = "5400000003"           # LabSuit shows a PO but no order date
         o.save()
         self.assertEqual(resolve.reconcile(TODAY), 0)
@@ -179,7 +172,7 @@ class ResolveTests(TestCase):
     def test_lab_updated_mark_dates_the_order_for_reconciliation(self):
         from datetime import datetime, timezone as tz
         o = self.order("2000")
-        resolve.approve_plans({o.pk: [("L", Decimal("2000"))]}, today=TODAY)
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
         Allocation.objects.filter(order=o).update(lab_updated_at=datetime(2026, 10, 13, 9, tzinfo=tz.utc))
         self.assertEqual(resolve.reconcile(TODAY), 0)                       # SAP report older than the mark
         self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("48000"))
@@ -188,7 +181,7 @@ class ResolveTests(TestCase):
 
     def test_grant_written_in_labsuit_marks_decision(self):
         o = self.order("2000")
-        resolve.approve_plans({o.pk: [("L", Decimal("2000"))]}, today=TODAY)
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
         self.assertEqual(resolve.mark_written_in_labsuit(), 0)          # LabSuit still says General Budget
         o.grant_label = "A"                                              # wrong grant → not marked
         o.save()
@@ -205,21 +198,45 @@ class ResolveTests(TestCase):
         User.objects.create_user("u", password="p")
         self.client.login(username="u", password="p")
         o = self.order("2000")
-        resolve.approve_plans({o.pk: [("L", Decimal("1500")), ("A", Decimal("500"))]}, today=TODAY)
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
         a = Allocation.objects.filter(order=o).first()
         self.client.post(f"/resolve/lab-updated/{a.pk}/")
         lines = Allocation.objects.filter(order=o)
         self.assertTrue(all(x.lab_updated_at and x.lab_updated_by == "u" for x in lines))   # whole order
         self.assertTrue(all(x.status == "approved" for x in lines))       # marked today > SAP 12/10: still reserved
-        self.assertContains(self.client.get("/resolve/"), "עודכן ·")
-        self.client.post(f"/resolve/lab-updated/{a.pk}/")
+        # marked orders leave the recycle bin, the orders page and the recommendations — for good
+        page = self.client.get("/resolve/")
+        self.assertEqual(page.context["bin"], [])
+        self.assertNotIn(o.pk, [r["order"].pk for r in page.context["rows"]])
+        self.assertNotIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
+        # …but the money stays deducted from the grants
+        self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("48000"))
+        self.client.post(f"/resolve/lab-updated/{a.pk}/")                # toggling back puts it in the bin again
         self.assertFalse(Allocation.objects.filter(order=o, lab_updated_at__isnull=False).exists())
+        self.assertEqual([g["order"] for g in self.client.get("/resolve/").context["bin"]], [o])
+
+    def test_marked_order_stays_gone_after_sap_covers_it(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user("u", password="p")
+        self.client.login(username="u", password="p")
+        o = self.order("2000")
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
+        self.client.post(f"/resolve/lab-updated/{Allocation.objects.get(order=o).pk}/")
+        o.po_number, o.date_ordered = "5400000009", TODAY
+        o.save()
+        self.assertEqual(resolve.reconcile(date(2026, 10, 20)), 1)       # SAP now covers it → superseded
+        self.assertEqual(Allocation.objects.get(order=o).status, "superseded")
+        page = self.client.get("/resolve/")
+        self.assertNotIn(o.pk, [r["order"].pk for r in page.context["rows"]])
+        self.assertEqual(page.context["bin"], [])
+        self.assertNotIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
+        self.assertEqual(resolve.compute(today=TODAY).plans, [])          # and is never recommended again
 
     def test_double_approval_refused(self):
         o = self.order("100")
-        resolve.approve_plans({o.pk: [("L", Decimal("100"))]}, today=TODAY)
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
         with self.assertRaises(resolve.ApprovalError):
-            resolve.approve_plans({o.pk: [("L", Decimal("100"))]}, today=TODAY)
+            resolve.approve_plans({o.pk: "L"}, today=TODAY)
 
 
 @override_settings(FX_AUTO_REFRESH=False)
@@ -265,10 +282,70 @@ class DashboardTests(TestCase):
         self.assertContains(page, "x")
         self.assertEqual(page.context["rows"][0]["lines"][0].grant.number, "A")
         # approving through the page posts the (possibly edited) lines
-        r = self.client.post("/resolve/approve/", {"order": [o.pk], f"g_{o.pk}": ["A"], f"a_{o.pk}": ["500.00"]})
+        r = self.client.post("/resolve/approve/", {"order": [o.pk], f"g_{o.pk}": ["A"]})
         self.assertEqual(Allocation.objects.filter(order=o, status="approved").count(), 1)
+        # the approved order leaves the orders page and waits in the recycle bin on the recommendations page
         orders_page = self.client.get("/orders/?year=all")
-        self.assertContains(orders_page, "ממתין ל-SAP")             # the decision shows on the orders dashboard
+        self.assertNotIn(o, [r["obj"] for r in orders_page.context["t"]["rows"]])
+        self.assertContains(orders_page, "סל המחזור")
+        bin_ = self.client.get("/resolve/").context["bin"]
+        self.assertEqual([g["order"] for g in bin_], [o])
+        self.assertTrue(bin_[0]["lines"][0].reason)                    # the recommendation's reason is kept
+
+    def _approved_order(self, amount="500", currency="ILS"):
+        self.post_json("/api/grants/A/", {"field": "line:MATERIAL", "value": "1000"})
+        o = OrderRequest.objects.create(natural_key="bin-1", item_name="bin item", status="approved",
+                                        amount_est=Decimal(amount), amount_currency=currency, category_id="MATERIAL",
+                                        date_requested=timezone_today())
+        self.client.post("/resolve/approve/", {"order": [o.pk], f"g_{o.pk}": ["A"]})
+        self.assertEqual(Allocation.objects.filter(order=o, status="approved").count(), 1)
+        return o
+
+    def test_recycle_returns_order_to_orders_page_and_recommendations(self):
+        o = self._approved_order()
+        a = Allocation.objects.get(order=o)
+        self.assertNotIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
+        self.assertNotIn(o.pk, [r["order"].pk for r in self.client.get("/resolve/").context["rows"]])
+        r = self.client.post(f"/resolve/recycle/{a.pk}/")
+        self.assertEqual(r.status_code, 302)
+        self.assertFalse(Allocation.objects.filter(order=o, status="approved").exists())
+        self.assertIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
+        page = self.client.get("/resolve/")
+        self.assertEqual(page.context["bin"], [])
+        row = next(r for r in page.context["rows"] if r["order"].pk == o.pk)
+        self.assertEqual(row["lines"][0].grant.number, "A")            # recommended again, from today's balances
+
+    def test_recycled_order_is_priced_at_todays_rate(self):
+        o = self._approved_order(amount="100", currency="EUR")
+        a = Allocation.objects.get(order=o)
+        self.assertEqual(a.amount_ils, Decimal("344.22"))
+        FxRate.objects.update_or_create(date=TODAY, currency="EUR", defaults={"rate_to_ils": Decimal("4.0000")})
+        g = self.client.get("/resolve/").context["bin"][0]
+        self.assertEqual((g["then"], g["now"], g["drift"]), (Decimal("344.22"), Decimal("400.0000"), True))
+        self.client.post(f"/resolve/recycle/{a.pk}/")
+        page = self.client.get("/resolve/")
+        row = next(r for r in page.context["rows"] if r["order"].pk == o.pk)
+        self.assertEqual(row["lines"][0].amount_ils, Decimal("400.00"))   # frozen rate dropped, repriced
+        self.assertEqual(Allocation.objects.get(pk=a.pk).status, "rejected")
+
+    def test_every_open_order_is_listed_with_a_marking(self):
+        self.post_json("/api/grants/A/", {"field": "line:MATERIAL", "value": "1000"})
+        kw = dict(status="approved", amount_est=Decimal("10"), amount_currency="ILS", category_id="MATERIAL")
+        ok = OrderRequest.objects.create(natural_key="k-ok", item_name="ok", date_requested=timezone_today(), **kw)
+        old = OrderRequest.objects.create(natural_key="k-old", item_name="old", date_requested=date(2020, 1, 1), **kw)
+        po = OrderRequest.objects.create(natural_key="k-po", item_name="has po", po_number="5400000001",
+                                         date_ordered=date(2026, 10, 1), date_requested=timezone_today(), **kw)
+        st = OrderRequest.objects.create(natural_key="k-st", item_name="standing", grant_label="Standing X",
+                                         date_requested=timezone_today(), **kw)
+        FundingAlias.objects.create(label="Standing X", kind="standing")
+        page = self.client.get("/resolve/")
+        states = {r["order"].pk: r["state"] for r in page.context["rows"]}
+        self.assertEqual(states[ok.pk], "ok")
+        self.assertEqual((states[old.pk], states[po.pk], states[st.pk]), ("skipped", "skipped", "standing"))
+        self.assertContains(page, "לא בחישוב")
+        # nothing from the orders page is missing from the recommendations
+        on_orders_page = {r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]}
+        self.assertTrue(on_orders_page <= set(states))
 
 
     def test_project_select_and_dash_for_empty(self):
@@ -511,7 +588,7 @@ class GrantCategoryViewTests(TestCase):
         GrantLine.objects.create(batch=b, grant=g, category_id="MATERIAL", balance=Decimal("4000"))
         o = OrderRequest.objects.create(natural_key="k", item_name="Antibody X", status="approved", amount_est=1500,
                                         category_id="MATERIAL", date_requested=timezone_today())
-        resolve.approve_plans({o.pk: [("A", Decimal("1500"))]})
+        resolve.approve_plans({o.pk: "A"})
         page = self.client.get("/")
         self.assertContains(page, "אחרי החלטות: 2,500")
         self.assertContains(page, "Antibody X")

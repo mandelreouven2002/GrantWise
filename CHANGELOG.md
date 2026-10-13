@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 — 2026-10-13
+- **Recycle bin (סל מחזור):** approving recommendations moves those orders out of "הזמנות ודרישות" and into a recycle bin at the bottom of the recommendations page. Each entry shows the funding that was approved, the full reason for the recommendation, the ₪ value at approval (and today's value when the rate or amount has moved), and who/when. "♻ מחזור" drops the decision and sends the order back to the orders page as an open request; the next recommendation prices it at today's exchange rate and balances.
+- **"עודכן במערכות המעבדה" removes the order from the bin and from the system's lists** (orders page, recommendations) for good — also after SAP later covers it. Its amount stays deducted from the grant (never returned) until SAP covers it, and is still listed in the grant's decisions. A confirmation guards the click. Orders whose LabSuit GRANT_ID already shows the decided grant are marked automatically at import, so they leave the bin too.
+- Orders with a decision (approved or covered by SAP) are never recommended again.
+- The orders page shows a banner with the number of orders waiting in the bin.
+- **Every open request on the orders page is listed in the recommendations table.** Requests that get no recommendation (too old, already have a PO, on a standing order) are rows marked with the reason instead of sitting in collapsed lists below.
+- **Splitting is gone.** Every request is funded in full from exactly one grant (the lab writes one GRANT_ID anyway): no "לאפשר פיצול" option, no "+ פיצול / מענק נוסף", no manual amounts, no `--split` in `run_resolve`, no LP-relaxation mode (`allow_split` is removed from `RESOLVE_DEFAULTS`). `approve_plans` now takes `{order_id: grant_number}`. A request no single grant covers is flagged "אין מקור מספיק" and gets no recommendation.
+- **The funding-labels table is removed from the orders dashboard** (with its "needs review" badge), and with it the table's editing endpoint. GRANT_ID values are still classified automatically (grant number / standing order / open). The now-empty "מימון שאושר ב-LabFund" column is removed too: decided orders are not listed on the orders page.
+- `resolve/cancel/<pk>/` (allocation_cancel) is replaced by `resolve/recycle/<pk>/` (allocation_recycle).
+
 ## 0.6.0 — 2026-10-13
 - Scope narrowed to orders, grants and recommendations: the inventory and budget-vs-actual dashboards are removed (their models and CLI importers stay; old inventory prices still fill missing order amounts).
 - The Merge preview warns about orders still "approved" in LabFund that are missing from the file (with an approved-only export: their status probably changed in LabSuit).

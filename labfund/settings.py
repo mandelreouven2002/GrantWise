@@ -95,7 +95,6 @@ RESOLVE_DEFAULTS = {
     "w_reserve": 0.5,
     "w_priority": 0.1,
     "w_fx": 0.05,
-    "allow_split": False,     # False = each request is funded from one grant (how the lab works); True = LP may split
     "respect_labels": False,  # True = orders already labelled in LabSuit keep that grant
 }
 

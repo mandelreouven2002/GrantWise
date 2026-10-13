@@ -200,7 +200,7 @@ def dry_run(source, data, file_name, as_of, mode, user="", **kw):
             fresh = sorted(FundingAlias.objects.filter(needs_review=True).exclude(label__in=aliases_before)
                            .values_list("label", flat=True))
             if fresh:
-                warnings.append("ערכי GRANT_ID חדשים שלא זוהו — לבדוק בטבלת תוויות המימון: " + ", ".join(fresh[:15])
+                warnings.append("ערכי GRANT_ID חדשים שלא זוהו (ההמלצה תתייחס אליהם כ\"פתוח\"): " + ", ".join(fresh[:15])
                                 + (f" ועוד {len(fresh) - 15}" if len(fresh) > 15 else ""))
             gone = OrderRequest.objects.filter(source="labsuit", is_current=False,
                                                allocations__status=Allocation.Status.APPROVED).distinct().count()

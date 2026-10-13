@@ -18,14 +18,13 @@ class Command(BaseCommand):
         p.add_argument("--replay-days", type=int, default=None,
                        help="Backtest: re-decide all purchases of the last N days")
         p.add_argument("--brief", action="store_true", help="One line per order, no reasons")
-        p.add_argument("--split", action="store_true", help="Allow splitting a request across grants")
 
-    def handle(self, today, sap_as_of, lookback_days, respect_labels, replay_days, brief, split=False, **_):
+    def handle(self, today, sap_as_of, lookback_days, respect_labels, replay_days, brief, **_):
         r = resolve.compute(
             today=date.fromisoformat(today) if today else None,
             sap_as_of=date.fromisoformat(sap_as_of) if sap_as_of else None,
             lookback_days=lookback_days, respect_labels=True if respect_labels else None,
-            replay_days=replay_days, allow_split=split or None)
+            replay_days=replay_days)
         self.stdout.write(self.style.SUCCESS(
             f"solver={r.solver} · plans={len(r.plans)} · needs amount={len(r.needs_amount)} "
             f"· standing={len(r.standing)} · skipped={len(r.skipped)} · SAP as of {r.sap_as_of}"))

@@ -13,7 +13,7 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db.models import Q
 
-from .models import (BudgetCategory, BudgetReportLine, FundingAlias, FxRate, Grant, GrantLine,
+from .models import (BudgetCategory, BudgetReportLine, FxRate, Grant, GrantLine,
                      GrantRule, ImportBatch, InventoryItem, OrderRequest, Project, ProjectGrant,
                      Reservation, TrackedCurrency)
 
@@ -98,14 +98,10 @@ TABLES = {t.key: t for t in [
           cols=[Col("date_requested", "תאריך", "date"), Col("item_name", "פריט", width="w-l", required=True),
                 Col("amount_est", "סכום", "money"), Col("amount_currency", "מטבע", "currency"),
                 Col("status", "סטטוס", "select", STATUSES), Col("grant_label", "GRANT_ID", width="w-m"),
-                Col("funding", "מימון שאושר ב-LabFund", "calc"), Col("category", "סעיף", "category"),
+                Col("category", "סעיף", "category"),
                 Col("project", "פרויקט", "project"), Col("requested_by", "מבקש/ת", width="w-m"),
                 Col("supplier", "ספק", width="w-m"), Col("po_number", "הזמנת רכש"), Col("quantity", "כמות", "num"),
                 Col("amount_source", "מקור סכום", "ro"), Col("lab_notes", "הערות", width="w-l")]),
-    Table("aliases", FundingAlias, "תוויות מימון מ-LabSuit", per_page=500,
-          cols=[Col("label", "תווית ב-LabSuit", "ro"),
-                Col("kind", "משמעות", "select", list(FundingAlias.Kind.choices)),
-                Col("grant", "מענק", "grant"), Col("needs_review", "לבדיקה", "bool")]),
     Table("fx", FxRate, "שערי חליפין", deletable=True, per_page=20,
           add=["date", "currency", "rate_to_ils"],
           cols=[Col("date", "תאריך", "date", required=True), Col("currency", "מטבע", "currency", required=True),
@@ -230,10 +226,6 @@ def set_value(table, obj, name, raw):
     # side effects
     if isinstance(obj, OrderRequest) and name == "amount_est":
         obj.amount_source = OrderRequest.AmountSource.MANUAL if obj.amount_est else OrderRequest.AmountSource.NONE
-    if isinstance(obj, FundingAlias) and name == "grant" and obj.grant_id:
-        obj.kind, obj.needs_review = FundingAlias.Kind.GRANT, False
-    if isinstance(obj, FundingAlias) and name == "kind":
-        obj.needs_review = False
     if isinstance(obj, Project) and name == "parent" and obj.parent_id == obj.pk:
         raise ValidationError("פרויקט לא יכול להיות פרויקט-העל של עצמו")
     obj.full_clean(validate_unique=False, exclude=[f.name for f in obj._meta.fields if f.name != name])
