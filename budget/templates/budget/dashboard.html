@@ -1,127 +1,43 @@
+{% extends "budget/base.html" %}
+{% block title %}סקירה · LabFund{% endblock %}
+{% block content %}
+<div class="titlebar"><h1>סקירה <span class="muted" style="font-weight:400">— {{ active_grants }} מענקים פעילים</span></h1></div>
+<p class="sub">יתרות לפי מענק וסעיף תקציבי. הפירוט המלא, השריונים והחלטות המימון נמצאים בדף <a href="{% url 'grants' %}">מענקים</a>.</p>
 
-<!DOCTYPE html>
-<html lang="he" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GrantWise Dashboard</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f5f6fa;
-            margin: 0;
-            padding: 30px;
-            color: #202638;
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: auto;
-        }
-
-        h1 {
-            margin-bottom: 8px;
-        }
-
-        .subtitle {
-            color: #64748b;
-            margin-bottom: 30px;
-        }
-
-        .table-wrapper {
-            background: white;
-            border-radius: 12px;
-            overflow-x: auto;
-            box-shadow: 0 2px 8px #00000010;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            min-width: 650px;
-        }
-
-        th, td {
-            padding: 14px;
-            text-align: right;
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        th {
-            background: #eef0ff;
-            font-weight: bold;
-        }
-
-        tbody tr:hover {
-            background: #f8f9ff;
-        }
-
-        .balance {
-            font-weight: bold;
-            color: #2563eb;
-        }
-
-        .empty {
-            text-align: center;
-            color: #64748b;
-            padding: 30px;
-        }
-    </style>
-</head>
-<body>
-<div class="container">
-
-    <h1>GrantWise Dashboard</h1>
-    <p class="subtitle">סקירה תקציבית של מענקי המחקר</p>
-
-    <h2>יתרות לפי גראנט וקטגוריה</h2>
-
-    <div class="table-wrapper">
-        <table>
-            <thead>
-                <tr>
-                    <th>Grant ID</th>
-                    <th>גורם מממן</th>
-                    <th>קטגוריה</th>
-                    <th>יתרה</th>
-                    <th>מטבע</th>
-                </tr>
-            </thead>
-
-            <tbody>
-                {% for grant in grants %}
-                    {% for category in grant.categories %}
-                    <tr>
-                        <td>{{ grant.number }}</td>
-                        <td>{{ grant.sponsor }}</td>
-                        <td>{{ category.name }}</td>
-                        <td class="balance">
-                            {{ category.balance|floatformat:2 }}
-                        </td>
-                        <td>{{ grant.currency }}</td>
-                    </tr>
-                    {% empty %}
-                    <tr>
-                        <td>{{ grant.number }}</td>
-                        <td>{{ grant.sponsor }}</td>
-                        <td>יתרה כוללת בלבד</td>
-                        <td class="balance">
-                            {{ grant.balance|floatformat:2 }}
-                        </td>
-                        <td>{{ grant.currency }}</td>
-                    </tr>
-                    {% endfor %}
-                {% empty %}
-                    <tr>
-                        <td colspan="5" class="empty">
-                            לא נמצאו מענקים פעילים.
-                        </td>
-                    </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-
+<div class="tbl-wrap" style="max-height:none">
+  <table>
+    <thead>
+      <tr>
+        <th>מענק</th>
+        <th>גורם מממן</th>
+        <th>סעיף</th>
+        <th class="num">יתרה</th>
+        <th>מטבע</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for grant in grants %}
+        {% for category in grant.categories %}
+        <tr>
+          <td class="ro"><b>{{ grant.number }}</b></td>
+          <td class="ro">{{ grant.sponsor }}</td>
+          <td class="ro">{{ category.name }}</td>
+          <td class="ro num">{{ category.balance|floatformat:2 }}</td>
+          <td class="ro">{{ grant.currency }}</td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td class="ro"><b>{{ grant.number }}</b></td>
+          <td class="ro">{{ grant.sponsor }}</td>
+          <td class="ro muted">יתרה כוללת בלבד</td>
+          <td class="ro num">{{ grant.balance|floatformat:2 }}</td>
+          <td class="ro">{{ grant.currency }}</td>
+        </tr>
+        {% endfor %}
+      {% empty %}
+        <tr><td class="ro muted" colspan="5">לא נמצאו מענקים פעילים.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
-</body>
-</html>
+{% endblock %}

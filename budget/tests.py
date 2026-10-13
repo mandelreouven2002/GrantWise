@@ -255,7 +255,7 @@ class DashboardTests(TestCase):
         return self.client.post(url, json.dumps(payload), content_type="application/json")
 
     def test_pages_render_without_admin(self):
-        for url in ["/", "/orders/", "/resolve/", "/settings/"]:
+        for url in ["/", "/grants/", "/orders/", "/resolve/", "/settings/"]:
             self.assertEqual(self.client.get(url).status_code, 200, url)
         for url in ["/admin/", "/inventory/", "/analysis/"]:                  # removed dashboards
             self.assertEqual(self.client.get(url).status_code, 404, url)
@@ -589,7 +589,7 @@ class GrantCategoryViewTests(TestCase):
         o = OrderRequest.objects.create(natural_key="k", item_name="Antibody X", status="approved", amount_est=1500,
                                         category_id="MATERIAL", date_requested=timezone_today())
         resolve.approve_plans({o.pk: "A"})
-        page = self.client.get("/")
+        page = self.client.get("/grants/")
         self.assertContains(page, "אחרי החלטות: 2,500")
         self.assertContains(page, "Antibody X")
         self.assertContains(page, "ממתין ל-SAP")
@@ -723,3 +723,35 @@ class AutoFetchTests(TestCase):
         self.assertContains(page, "כבר לא פעילה")
         self.assertFalse(PendingImport.objects.exists())
 
+
+@override_settings(FX_AUTO_REFRESH=False)
+class HomePageTests(TestCase):
+    """The home page is a normal page of the site: navigation, logout, and the messages of whatever sent you."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user("u", password="p")
+        self.client.login(username="u", password="p")
+
+    def test_home_has_the_site_navigation(self):
+        page = self.client.get("/")
+        self.assertEqual(page.status_code, 200)
+        for label in ("הזמנות ודרישות", "מענקים", "המלצות", "הגדרות", "יציאה"):
+            self.assertContains(page, label)
+        self.assertContains(page, 'href="/orders/"')
+        self.assertContains(page, 'href="/grants/"')
+
+    def test_messages_are_shown_after_redirecting_home(self):
+        # e.g. cancelling an import sends you to "/" with a message
+        from budget.models import PendingImport
+        p = PendingImport.objects.create(table_key="orders", source="labsuit_orders", file_name="x.xlsx",
+                                         data=b"", mode="merge", as_of=TODAY, preview={"counts": {}},
+                                         uploaded_by="u")
+        r = self.client.post(f"/import/{p.pk}/cancel/", follow=True)
+        self.assertContains(r, "העדכון בוטל")
+        self.assertContains(r, "הזמנות ודרישות")             # …on a page with the navigation
+
+    def test_login_lands_on_a_page_with_navigation(self):
+        self.client.logout()
+        r = self.client.post("/login/", {"username": "u", "password": "p"}, follow=True)
+        self.assertContains(r, 'href="/orders/"')

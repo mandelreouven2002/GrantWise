@@ -127,10 +127,11 @@
 </head>
 <body>
 <header>
-  <div class="brand">LabFund</div>
+  <a class="brand" href="{% url 'dashboard' %}" style="color:inherit;text-decoration:none">LabFund</a>
   {% if user.is_authenticated %}
   <nav>
     {% with u=request.resolver_match.url_name %}
+    <a href="{% url 'dashboard' %}" class="{% if u == 'dashboard' %}on{% endif %}">סקירה</a>
     <a href="{% url 'orders' %}" class="{% if u == 'orders' %}on{% endif %}">הזמנות ודרישות</a>
     <a href="{% url 'grants' %}" class="{% if u == 'grants' %}on{% endif %}">מענקים</a>
     <a href="{% url 'resolve' %}" class="{% if u == 'resolve' %}on{% endif %}">המלצות</a>
