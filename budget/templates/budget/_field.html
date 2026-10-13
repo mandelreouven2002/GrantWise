@@ -1,1 +1,14 @@
-{% with c=a.col %}<label>{{ c.label }}{% if c.required %} *{% endif %}</label>{% if a.choices %}<select name="{{ c.field }}" class="f">{% for v, l in a.choices %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select>{% elif c.kind == "bool" %}<input type="checkbox" name="{{ c.field }}" {% if c.default != False %}checked{% endif %}>{% elif c.kind == "date" %}<input type="date" name="{{ c.field }}" class="f" {% if c.required %}required{% endif %}>{% elif c.kind in "money num int" %}<input name="{{ c.field }}" inputmode="decimal" class="f ltr" {% if c.required %}required{% endif %}>{% else %}<input name="{{ c.field }}" {% if c.field == "password" %}type="password"{% endif %} class="f" {% if c.required %}required{% endif %}>{% endif %}{% endwith %}
+{% with c=a.col %}
+<label for="field-{{ c.field }}">{{ c.label }}{% if c.required %} *{% endif %}</label>
+{% if a.choices %}
+<select id="field-{{ c.field }}" name="{{ c.field }}" class="f" {% if c.required %}required{% endif %}>{% for v, l in a.choices %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select>
+{% elif c.kind == "bool" %}
+<input id="field-{{ c.field }}" type="checkbox" name="{{ c.field }}" {% if c.default != False %}checked{% endif %}>
+{% elif c.kind == "date" %}
+<input id="field-{{ c.field }}" type="date" name="{{ c.field }}" class="f" {% if c.required %}required{% endif %}>
+{% elif c.kind in "money num int" %}
+<input id="field-{{ c.field }}" name="{{ c.field }}" inputmode="decimal" class="f ltr" {% if c.required %}required{% endif %}>
+{% else %}
+<input id="field-{{ c.field }}" name="{{ c.field }}" {% if c.field == "password" %}type="password"{% endif %} class="f" {% if c.required %}required{% endif %}>
+{% endif %}
+{% endwith %}
