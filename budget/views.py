@@ -168,7 +168,10 @@ def orders_view(request):
     g = request.GET
     years = [d.year for d in OrderRequest.objects.dates("date_requested", "year", order="DESC")]
     year = g.get("year", str(years[0]) if years else "")
-    qs = OrderRequest.objects.filter(is_current=True).select_related("project", "category")
+    # Orders with an approved funding decision wait in the recycle bin on the recommendations page
+    # until they are recycled back here (or SAP covers them).
+    qs = (OrderRequest.objects.filter(is_current=True).select_related("project", "category")
+          .exclude(allocations__status=Allocation.Status.APPROVED))
     if year and year != "all":
         qs = qs.filter(date_requested__year=int(year))
     if g.get("status"):
@@ -189,6 +192,8 @@ def orders_view(request):
                 c["value"] = labels.get(r["pk"], "")
     return render(request, "budget/orders.html", dict(
         t=t, total=qs.count(), years=years, year=year,
+        in_bin=(Allocation.objects.filter(status=Allocation.Status.APPROVED, order__is_current=True)
+                .values("order_id").distinct().count()),
         aliases=table_ctx("aliases", aliases, paginate=False),
         review=FundingAlias.objects.filter(needs_review=True).count()))
 
@@ -230,10 +235,22 @@ def resolve_view(request):
                                     ("amount_est", "amount_currency", "category", "project")}))
             payload["orders"][o.pk] = dict(amount=float(c.amount), cur=c.currency, rate=float(c.rate),
                                            cat=c.category, opts=[x["num"] for x in opts])
+        def _cells(o):
+            return {f: _cell_with_choices(TABLES["orders"].col(f), o) for f in
+                    ("amount_est", "amount_currency", "category", "project")}
+
         for o in result.needs_amount:
-            rows.append(dict(order=o, state="noamount", lines=[], options=[], why_not=[],
-                             cells={f: _cell_with_choices(TABLES["orders"].col(f), o) for f in
-                                    ("amount_est", "amount_currency", "category", "project")}))
+            rows.append(dict(order=o, state="noamount", lines=[], options=[], why_not=[], cells=_cells(o)))
+        # Everything still open on the orders page is listed here, marked with why it gets no recommendation
+        # (orders already approved here are in the recycle bin instead).
+        in_bin = set(Allocation.objects.filter(status=Allocation.Status.APPROVED).values_list("order_id", flat=True))
+        for o, why in result.skipped:
+            if o.pk not in in_bin:
+                rows.append(dict(order=o, state="skipped", lines=[], options=[], why_not=[], note=why,
+                                 cells=_cells(o)))
+        for o in result.standing:
+            rows.append(dict(order=o, state="standing", lines=[], options=[], why_not=[],
+                             note="על הזמנה עומדת / שמור-מכור — כבר מחויבת ב-SAP, לא דורשת החלטה", cells=_cells(o)))
         for num in used_grants:
             st = result.states[num]
             g = st.grant
@@ -242,17 +259,35 @@ def resolve_view(request):
                 cats={k: float(v) for k, v in st.cats.items()}, extra={k: float(v) for k, v in st.extra.items()},
                 label=(g.sponsor or g.description)[:40], end=g.end_date.strftime("%d/%m/%Y") if g.end_date else "",
                 days=st.days_left)
-        rank = {"unfunded": 0, "split": 1, "ok": 1, "noamount": 2}
+        rank = {"unfunded": 0, "split": 1, "ok": 1, "noamount": 2, "skipped": 3, "standing": 3}
         rows.sort(key=lambda r: (rank[r["state"]], -(r["order"].date_requested or date.min).toordinal()))
     payload["catNames"] = dict(BudgetCategory.objects.values_list("code", "name_he"))
 
-    approved = (Allocation.objects.filter(status=Allocation.Status.APPROVED)
-                .select_related("order", "grant").order_by("-decided_at")[:50])
+    count = lambda *states: sum(1 for r in rows if r["state"] in states)  # noqa: E731
     return render(request, "budget/resolve.html", dict(
-        result=result, error=error, rows=rows, approved=approved, params=params, payload=payload,
-        n_ready=sum(1 for r in rows if r["state"] != "noamount"),
-        n_noamount=sum(1 for r in rows if r["state"] == "noamount"),
-        n_unfunded=sum(1 for r in rows if r["state"] == "unfunded")))
+        result=result, error=error, rows=rows, bin=_recycle_bin(), params=params, payload=payload,
+        n_ready=count("ok", "split", "unfunded"), n_noamount=count("noamount"),
+        n_unfunded=count("unfunded"), n_skipped=count("skipped"), n_standing=count("standing")))
+
+
+def _recycle_bin():
+    """Approved decisions that SAP does not cover yet, one entry per order, with the recommendation's reason.
+    These orders are hidden from the orders page; recycling one sends it back there."""
+    groups = {}
+    lines = (Allocation.objects.filter(status=Allocation.Status.APPROVED)
+             .select_related("order", "grant", "category").order_by("-decided_at", "id"))
+    for a in lines:
+        g = groups.setdefault(a.order_id, dict(order=a.order, lines=[], pk=a.pk, decided_by=a.decided_by,
+                                               decided_at=a.decided_at, lab_updated_at=a.lab_updated_at,
+                                               then=Decimal("0")))
+        g["lines"].append(a)
+        g["then"] += a.amount_ils or 0
+    for g in groups.values():
+        o = g["order"]
+        g["now"] = _ils(o.amount_est, o.amount_currency) if o.amount_est else None
+        # the exchange rate (or the amount, if LabSuit changed it) moved since the approval
+        g["drift"] = bool(g["now"] is not None and g["then"] and abs(g["now"] - g["then"]) / g["then"] > Decimal("0.005"))
+    return list(groups.values())
 
 
 def _dec(v):
@@ -279,7 +314,8 @@ def resolve_approve(request):
         return redirect(nxt)
     try:
         n = resolver.approve_plans(decisions, user=request.user.get_username(), edited=edited)
-        messages.success(request, f"אושרו {n} הזמנות. היתרות בכל הדשבורדים עודכנו (\"ממתין\"). "
+        messages.success(request, f"אושרו {n} הזמנות והועברו לסל המחזור (למטה) — הן כבר לא מופיעות ב\"הזמנות ודרישות\". "
+                                  "היתרות בכל הדשבורדים עודכנו (\"ממתין\"). "
                                   "נשאר לעדכן ידנית את ה-GRANT_ID ב-LabSuit / את ההזמנה ב-SAP — "
                                   "האישור כאן אינו הזמנת רכש.")
     except resolver.ApprovalError as e:
@@ -291,11 +327,14 @@ def resolve_approve(request):
 
 @login_required
 @require_POST
-def allocation_cancel(request, pk):
+def allocation_recycle(request, pk):
+    """Recycle: the order was not really approved after all — drop the decision (its frozen amounts and
+    rates) and send the order back to the orders page, where the next recommendation prices it afresh."""
     a = get_object_or_404(Allocation, pk=pk, status=Allocation.Status.APPROVED)
     Allocation.objects.filter(order=a.order, status=Allocation.Status.APPROVED).update(
         status=Allocation.Status.REJECTED, decided_by=request.user.get_username(), decided_at=timezone.now())
-    messages.success(request, f"האישור בוטל: {a.order.item_name}")
+    messages.success(request, f"הוחזר להזמנות ודרישות: {a.order.item_name}. "
+                              "ההמלצה תחושב מחדש לפי השערים והיתרות של היום.")
     return redirect("resolve")
 
 
