@@ -174,18 +174,20 @@ def dry_run(source, data, file_name, as_of, mode, user="", **kw):
                         status_moves[(st[0] or "—", st[1] or "—")] += 1
             else:
                 unchanged += 1
-        # rows that vanished from a per-batch source (the SAP report) or were hidden by Replace
+        # rows that vanished from a per-batch source (the SAP report) or were hidden by Replace; orders deleted
+        # because the file shows they were already handled ("updated in the lab systems") are listed apart
+        retired = set(Allocation.objects.exclude(order_key="").values_list("order_key", flat=True))
         for key, (was_cur, name, _) in before.items():
-            if key not in after and was_cur:
+            if key not in after and was_cur and key not in retired:
                 hidden.append(name)
 
         reconciled = []
         for a in (Allocation.objects.filter(pk__in=approved_before, status=Allocation.Status.SUPERSEDED)
                   .select_related("order", "grant")):
-            reconciled.append({"item": a.order.item_name[:60], "grant": a.grant_id,
+            reconciled.append({"item": a.item_name[:60], "grant": a.grant_id,
                                "amount": f"{a.amount_grant_ccy or 0:,.2f} {a.grant.currency if a.grant else ''}"})
 
-        lab_marked = sorted({a.order.item_name[:60] for a in Allocation.objects.filter(
+        lab_marked = sorted({a.item_name[:60] for a in Allocation.objects.filter(
             pk__in=unmarked_before, lab_updated_at__isnull=False).select_related("order")})
 
         in_file = [k for k, v in after.items() if v[0]]

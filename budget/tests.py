@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
+import unittest
 from unittest import mock
 
 from django.test import TestCase, override_settings
@@ -85,6 +86,42 @@ class ResolveTests(TestCase):
         self.assertAlmostEqual(float(used_a), 1000 * 1.03 / 3.4422, delta=0.1)   # the 1,000 ₪ request + FX margin
         self.assertTrue(any(l.grant.number == "L" for l in lines))
         self.assertFalse(any(l.grant.number == "R" for l in lines), "reserve should be the last resort")
+
+    # ---- plain-language explanation
+
+    def reason_of(self, result, order):
+        return self.plan_of(result, order).lines[0].reason.split("\n")
+
+    def test_explanation_for_an_expiring_grant(self):
+        o = self.order("1000")
+        lines = self.reason_of(resolve.compute(today=TODAY), o)
+        self.assertIn("המענק מסתיים בעוד 80 ימים", lines[0])
+        self.assertIn("כדאי לנצל אותו לפני שיפוג", lines[0])
+        self.assertTrue(lines[1].startswith("יורדים ממנו") and "ונשארים" in lines[1])
+        self.assertTrue(any(l.startswith("⚠ ההזמנה ב-ILS והמענק ב-EUR") and "3%" in l for l in lines))
+        self.assertTrue(any(l.startswith("הבא בתור: ") for l in lines))
+
+    def test_explanation_names_the_only_eligible_grant_and_has_no_alternative(self):
+        GrantRule.objects.create(grant=self.soon, category_id="MATERIAL", allowed=False)
+        GrantRule.objects.create(grant=self.reserve, category_id="MATERIAL", allowed=False)
+        o = self.order("1000")
+        lines = self.reason_of(resolve.compute(today=TODAY), o)
+        self.assertEqual(lines[0], "זה המענק היחיד שמתאים להזמנה הזו.")
+        self.assertFalse(any(l.startswith("הבא בתור") for l in lines))
+        self.assertFalse(any(l.startswith("⚠") for l in lines))        # same currency, plenty left: nothing to warn
+
+    def test_split_of_reason_into_main_text_and_comparison(self):
+        o = self.order("1000")
+        line = self.plan_of(resolve.compute(today=TODAY), o).lines[0]
+        self.assertTrue(line.reason_compare.startswith("הבא בתור"))
+        self.assertNotIn("הבא בתור", line.reason_main)
+
+    def test_saved_reason_flags_a_manual_choice_and_names_the_next_in_line(self):
+        o = self.order("2000")
+        resolve.approve_plans({o.pk: "L"}, today=TODAY, edited={o.pk})
+        reason = Allocation.objects.get(order=o).reason
+        self.assertIn("⚠ בחרת מענק אחר מההמלצה.", reason)
+        self.assertIn("הבא בתור: ", reason)
 
     def test_compute_writes_nothing(self):
         self.order("1000")
@@ -190,47 +227,74 @@ class ResolveTests(TestCase):
         o.save()
         FundingAlias.objects.create(label="L", kind="grant", grant=self.later)
         self.assertEqual(resolve.mark_written_in_labsuit(), 1)
-        a = Allocation.objects.get(order=o)
+        self.assertFalse(OrderRequest.objects.filter(pk=o.pk).exists())    # same as pressing the button: deleted
+        a = Allocation.objects.get()
         self.assertEqual((a.status, a.lab_updated_by), ("approved", "LabSuit (GRANT_ID)"))   # still reserved
+        self.assertEqual((a.order_id, a.item_name), (None, o.item_name))
 
-    def test_lab_updated_button_toggles_and_keeps_reservation(self):
+    def test_lab_updated_button_deletes_the_order_and_keeps_the_reservation(self):
         from django.contrib.auth.models import User
         User.objects.create_user("u", password="p")
         self.client.login(username="u", password="p")
         o = self.order("2000")
         resolve.approve_plans({o.pk: "L"}, today=TODAY)
-        a = Allocation.objects.filter(order=o).first()
+        a = Allocation.objects.get(order=o)
         self.client.post(f"/resolve/lab-updated/{a.pk}/")
-        lines = Allocation.objects.filter(order=o)
-        self.assertTrue(all(x.lab_updated_at and x.lab_updated_by == "u" for x in lines))   # whole order
-        self.assertTrue(all(x.status == "approved" for x in lines))       # marked today > SAP 12/10: still reserved
-        # marked orders leave the recycle bin, the orders page and the recommendations — for good
+        self.assertFalse(OrderRequest.objects.filter(pk=o.pk).exists())    # really deleted
+        a.refresh_from_db()
+        self.assertEqual((a.status, a.lab_updated_by, a.order_id), ("approved", "u", None))   # …but still reserved
+        self.assertEqual((a.item_name, a.order_key), (o.item_name, o.natural_key))
+        # nothing of it is left in the recycle bin, the orders page or the recommendations
         page = self.client.get("/resolve/")
         self.assertEqual(page.context["bin"], [])
-        self.assertNotIn(o.pk, [r["order"].pk for r in page.context["rows"]])
-        self.assertNotIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
-        # …but the money stays deducted from the grants
+        self.assertNotIn(o.item_name, [r["order"].item_name for r in page.context["rows"]])
+        self.assertNotIn(o.item_name, [r["obj"].item_name for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
+        # the money stays deducted from the grant, and the decision still shows in the grant's list
         self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("48000"))
-        self.client.post(f"/resolve/lab-updated/{a.pk}/")                # toggling back puts it in the bin again
-        self.assertFalse(Allocation.objects.filter(order=o, lab_updated_at__isnull=False).exists())
-        self.assertEqual([g["order"] for g in self.client.get("/resolve/").context["bin"]], [o])
+        self.assertContains(self.client.get("/grants/"), o.item_name)
+        # pressing it again (old tab) changes nothing
+        self.client.post(f"/resolve/lab-updated/{a.pk}/")
+        self.assertEqual(Allocation.objects.count(), 1)
 
-    def test_marked_order_stays_gone_after_sap_covers_it(self):
+    def test_deleted_order_is_covered_by_sap_by_the_marked_date(self):
         from django.contrib.auth.models import User
         User.objects.create_user("u", password="p")
         self.client.login(username="u", password="p")
         o = self.order("2000")
         resolve.approve_plans({o.pk: "L"}, today=TODAY)
         self.client.post(f"/resolve/lab-updated/{Allocation.objects.get(order=o).pk}/")
-        o.po_number, o.date_ordered = "5400000009", TODAY
-        o.save()
-        self.assertEqual(resolve.reconcile(date(2026, 10, 20)), 1)       # SAP now covers it → superseded
-        self.assertEqual(Allocation.objects.get(order=o).status, "superseded")
-        page = self.client.get("/resolve/")
-        self.assertNotIn(o.pk, [r["order"].pk for r in page.context["rows"]])
-        self.assertEqual(page.context["bin"], [])
-        self.assertNotIn(o.pk, [r["pk"] for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
-        self.assertEqual(resolve.compute(today=TODAY).plans, [])          # and is never recommended again
+        self.assertEqual(resolve.reconcile(TODAY), 0)                       # report older than the mark
+        self.assertEqual(resolve.reconcile(date(2026, 10, 20)), 1)          # a later report covers it
+        self.assertEqual(Allocation.objects.get().status, "superseded")
+        self.assertEqual(resolve.grant_states(TODAY, date(2026, 10, 20))["L"].total, Decimal("50000"))
+
+    def test_the_same_request_returning_is_a_new_request_and_is_not_subtracted_twice(self):
+        o = self.order("2000", po_number="5400000077", date_ordered=date(2026, 10, 14))
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
+        Allocation.objects.filter(order=o).update(lab_updated_at=timezone_now())
+        resolve.retire_orders([o.pk])
+        self.assertEqual(OrderRequest.objects.count(), 0)
+        # LabSuit lists it again: it is simply a new request…
+        back = OrderRequest.objects.create(natural_key=o.natural_key, item_name=o.item_name, status="approved",
+                                           amount_est=Decimal("2000"), amount_currency="ILS", category_id="MATERIAL",
+                                           po_number="5400000077", date_ordered=date(2026, 10, 14),
+                                           grant_label="L", date_requested=TODAY)
+        FundingAlias.objects.create(label="L", kind="grant", grant=self.later)
+        self.assertEqual(Allocation.objects.get().order_id, None)             # not re-linked
+        # …but the money already reserved for it is not taken a second time as an "unseen" order
+        self.assertEqual(resolve.unseen_orders(TODAY, TODAY), [])
+        self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("48000"))
+        self.assertIn(back.pk, [p.cand.order.pk for p in resolve.compute(today=TODAY).plans])
+
+    def test_deleting_an_order_by_hand_releases_an_unmarked_decision(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user("u", password="p")
+        self.client.login(username="u", password="p")
+        o = self.order("2000", source="manual")           # LabSuit rows are only hidden by the delete button
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
+        self.client.post(f"/api/orders/{o.pk}/delete/")
+        self.assertFalse(Allocation.objects.exists())
+        self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("50000"))
 
     def test_double_approval_refused(self):
         o = self.order("100")
@@ -255,7 +319,7 @@ class DashboardTests(TestCase):
         return self.client.post(url, json.dumps(payload), content_type="application/json")
 
     def test_pages_render_without_admin(self):
-        for url in ["/", "/orders/", "/resolve/", "/settings/"]:
+        for url in ["/", "/grants/", "/orders/", "/resolve/", "/settings/"]:
             self.assertEqual(self.client.get(url).status_code, 200, url)
         for url in ["/admin/", "/inventory/", "/analysis/"]:                  # removed dashboards
             self.assertEqual(self.client.get(url).status_code, 404, url)
@@ -483,6 +547,11 @@ class SkippedReasonTests(TestCase):
         self.assertIn("180", reasons["too old"])
 
 
+def timezone_now():
+    from django.utils import timezone
+    return timezone.now()
+
+
 def timezone_today():
     from django.utils import timezone
     return timezone.localdate()
@@ -589,10 +658,63 @@ class GrantCategoryViewTests(TestCase):
         o = OrderRequest.objects.create(natural_key="k", item_name="Antibody X", status="approved", amount_est=1500,
                                         category_id="MATERIAL", date_requested=timezone_today())
         resolve.approve_plans({o.pk: "A"})
-        page = self.client.get("/")
+        page = self.client.get("/grants/")
         self.assertContains(page, "אחרי החלטות: 2,500")
         self.assertContains(page, "Antibody X")
         self.assertContains(page, "ממתין ל-SAP")
+
+
+@override_settings(FX_AUTO_REFRESH=False)
+class NoEstimatedAmountsTests(TestCase):
+    """An order's amount is LabSuit's own price or a typed-in amount — never filled in from an earlier order."""
+
+    @staticmethod
+    def xlsx(rows):
+        import io
+        import pandas as pd
+        buf = io.BytesIO()
+        pd.DataFrame({"ITEM_NAME": [r[0] for r in rows], "CATALOG_NUMBER": [r[1] for r in rows],
+                      "TOTAL": [r[2] for r in rows], "REQUESTED_BY": ["a@lab.example"] * len(rows),
+                      "STATUS": ["approved"] * len(rows), "QUANTITY": [1] * len(rows),
+                      "DATE_REQUESTED": [f"{10 + i}-10-2026" for i in range(len(rows))],
+                      "GRANT_ID": ["General Budget"] * len(rows)}).to_excel(buf, sheet_name="Year - 2026", index=False)
+        return buf.getvalue()
+
+    def import_rows(self, rows):
+        from budget.importers import run_import
+        return run_import("labsuit_orders", self.xlsx(rows), "o.xlsx", TODAY, "merge")
+
+    def test_unpriced_order_gets_no_amount_even_if_same_catalog_number_was_priced(self):
+        self.import_rows([("Antibody", "AB-1", "ILS 250"), ("Antibody again", "AB-1", None)])
+        priced = OrderRequest.objects.get(item_name="Antibody")
+        unpriced = OrderRequest.objects.get(item_name="Antibody again")
+        self.assertEqual((priced.amount_est, priced.amount_source), (Decimal("250.00"), "labsuit"))
+        self.assertEqual((unpriced.amount_est, unpriced.amount_source), (None, "none"))
+
+    def test_no_price_means_no_recommendation_until_an_amount_is_typed(self):
+        b = ImportBatch.objects.create(source="sap_grants", file_name="t", as_of=TODAY)
+        g = Grant.objects.create(number="A", currency="ILS", end_date=date(2027, 6, 1), balance_total=5000,
+                                 last_batch=b)
+        GrantLine.objects.create(batch=b, grant=g, category_id="MATERIAL", balance=Decimal("5000"))
+        FxRate.objects.create(date=TODAY, currency="USD", rate_to_ils=Decimal("3.078"))
+        self.import_rows([("Unpriced", "X-1", None)])
+        o = OrderRequest.objects.get(item_name="Unpriced")
+        o.date_requested = TODAY
+        o.category_id = "MATERIAL"
+        o.save()
+        r = resolve.compute(today=TODAY)
+        self.assertEqual(r.needs_amount, [o])
+        self.assertEqual(r.plans, [])
+
+    def test_old_estimates_are_cleared_on_import_but_manual_amounts_survive(self):
+        self.import_rows([("Old guess", "G-1", None), ("Typed in", "G-2", None), ("Real price", "G-3", "ILS 90")])
+        OrderRequest.objects.filter(item_name="Old guess").update(amount_est=Decimal("40"), amount_source="history")
+        OrderRequest.objects.filter(item_name="Typed in").update(amount_est=Decimal("70"), amount_source="manual")
+        self.import_rows([("Old guess", "G-1", None), ("Typed in", "G-2", None), ("Real price", "G-3", None)])
+        got = {o.item_name: (o.amount_est, o.amount_source) for o in OrderRequest.objects.all()}
+        self.assertEqual(got["Old guess"], (None, "none"))                         # legacy estimate dropped
+        self.assertEqual(got["Typed in"], (Decimal("70.00"), "manual"))            # lab's own amount kept
+        self.assertEqual(got["Real price"], (Decimal("90.00"), "labsuit"))         # price LabSuit stopped sending is kept
 
 
 @override_settings(FX_AUTO_REFRESH=False, AUTOFETCH_SYNC=True)
@@ -723,3 +845,246 @@ class AutoFetchTests(TestCase):
         self.assertContains(page, "כבר לא פעילה")
         self.assertFalse(PendingImport.objects.exists())
 
+
+# --------------------------------------------------------------------------- PDF scraping against a mock LabSuit
+
+def _chromium_ready():
+    try:
+        import os
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            return os.path.exists(p.chromium.executable_path)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+MOCK_ROWS = [
+    dict(name="Calfectin Transfection Reagent", by="Elian Far", cat="SL100478", quote="19363", pdf=True),
+    dict(name="Pipette tips", by="Dana Lev", cat="PT-1", quote="20001", pdf=True),
+    dict(name="Pipette tips", by="Noa Bar", cat="PT-1", quote="20002", pdf=True),      # same name, other quote
+    dict(name="Gloves", by="Dana Lev", cat="GL-9", quote="20003", pdf=False),           # nothing attached
+] + [dict(name=f"Filler item {i}", by="Dana Lev", cat=f"F-{i}", quote=str(30000 + i), pdf=True) for i in range(8)]
+
+
+class MockLabSuit:
+    """A small stand-in for LabSuit's orders page: login, list that loads more on scroll, Export popup,
+    a side panel with the request's file, and PDFs that need the login cookie."""
+
+    def __init__(self, viewer=False):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        site = self
+        self.viewer = viewer
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body, ctype="text/html; charset=utf-8", headers=()):
+                if isinstance(body, str):
+                    body = body.encode()
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _auth(self):
+                return "sid=ok" in (self.headers.get("Cookie") or "")
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(302)
+                self.send_header("Set-Cookie", "sid=ok; Path=/")
+                self.send_header("Location", "/home")
+                self.end_headers()
+
+            def do_GET(self):
+                path = self.path.split("?")[0]
+                if path == "/home":
+                    return self._send(200, "<html><body>Home</body></html>")
+                if path.startswith("/dashboard"):
+                    return self._send(200, site.page() if self._auth() else LOGIN_PAGE)
+                if path == "/export.xlsx":
+                    if not self._auth():
+                        return self._send(403, "no")
+                    return self._send(200, site.xlsx(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                      [("Content-Disposition", 'attachment; filename="orders.xlsx"')])
+                if path.startswith("/files/"):
+                    if not self._auth():
+                        return self._send(403, "no")
+                    q = path.rsplit("_", 1)[-1].replace(".pdf", "")
+                    body = f"%PDF-1.4\n% quote {q}\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n".encode()
+                    return self._send(200, body, "application/pdf")
+                self._send(404, "not found")
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/dashboard/?labId=1#orders/status[]=approved"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.server.shutdown()
+
+    def xlsx(self):
+        import io
+        import pandas as pd
+        buf = io.BytesIO()
+        n = len(MOCK_ROWS)
+        pd.DataFrame({"ITEM_NAME": [r["name"] for r in MOCK_ROWS], "CATALOG_NUMBER": [r["cat"] for r in MOCK_ROWS],
+                      "REQUESTED_BY": [r["by"] for r in MOCK_ROWS], "QUOTE_ID": [r["quote"] for r in MOCK_ROWS],
+                      "STATUS": ["approved"] * n, "DATE_REQUESTED": ["10-10-2026"] * n,
+                      "GRANT_ID": ["General Budget"] * n, "TOTAL": ["ILS 100"] * n}).to_excel(
+            buf, sheet_name="Year - 2026", index=False)
+        return buf.getvalue()
+
+    def page(self):
+        import json
+        viewer = "true" if self.viewer else "false"
+        return f"""<!doctype html><html><body style="margin:0">
+<button id="exp">Export</button><div id="modal" role="dialog" style="display:none"><button id="exp2">Export</button></div>
+<div id="list"></div><div id="panel" style="position:fixed;right:0;top:0;width:360px;background:#fff"></div>
+<script>
+const rows = {json.dumps(MOCK_ROWS)}; let shown = 0; const viewer = {viewer};
+function more() {{ for (let i = 0; i < 4 && shown < rows.length; i++, shown++) {{
+  const r = rows[shown], d = document.createElement('div'); d.className = 'card'; d.style.minHeight = '260px';
+  d.innerHTML = '<a href="#" class="title">' + r.name + '</a> <span>By:</span> <b>' + r.by + '</b> <span>Catalog #</span> <b>'
+    + r.cat + '</b> <span>Quote #</span> <a href="#">' + r.quote + '</a>';
+  d.querySelector('.title').onclick = (e) => {{ e.preventDefault(); openPanel(r); }};
+  document.getElementById('list').appendChild(d); }} }}
+function openPanel(r) {{
+  const p = document.getElementById('panel');
+  if (!r.pdf) {{ p.innerHTML = '<h3>Files</h3><button>Attach File</button>'; return; }}
+  const name = 'workorder_' + r.quote + '.pdf';
+  p.innerHTML = '<h3>Files</h3><a id="f" href="' + (viewer ? '#' : '/files/' + name) + '">' + name + '</a><button>Attach File</button>';
+  if (viewer) document.getElementById('f').onclick = (e) => {{ e.preventDefault();
+    p.insertAdjacentHTML('beforeend', '<iframe src="/files/' + name + '" width="300" height="200"></iframe>'); }};
+}}
+document.addEventListener('keydown', e => {{ if (e.key === 'Escape') document.getElementById('panel').innerHTML = ''; }});
+window.addEventListener('scroll', () => {{ if (innerHeight + scrollY >= document.body.scrollHeight - 80) more(); }});
+document.getElementById('exp').onclick = () => document.getElementById('modal').style.display = 'block';
+document.getElementById('exp2').onclick = () => {{ location.href = '/export.xlsx'; }};
+more();
+</script></body></html>"""
+
+
+LOGIN_PAGE = """<html><body><form method="post" action="/login">
+<input type="text" name="u"><input type="password" name="p"><button type="submit">Login</button></form></body></html>"""
+
+
+@unittest.skipUnless(_chromium_ready(), "needs Playwright's Chromium (python -m playwright install chromium)")
+@override_settings(FX_AUTO_REFRESH=False, AUTOFETCH_SYNC=True, AUTOFETCH_PDF_PANEL_SECONDS=2)
+class PdfScrapingTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user("u", password="p")
+        self.client.login(username="u", password="p")
+
+    def targets_by_quote(self, site):
+        from budget.importers.labsuit_orders import scrape_targets
+        return {t["quote_id"]: t for t in scrape_targets(site.xlsx())}
+
+    def test_robot_saves_the_right_pdf_for_every_request(self):
+        from budget import autofetch
+        site = MockLabSuit()
+        self.addCleanup(site.stop)
+        data, name, extra = autofetch.fetch_labsuit(site.url, "u", "p", download_seconds=20, attachments={})
+        by_quote = self.targets_by_quote(site)
+        got = {f["quote_id"]: f for f in extra["files"]}
+        want = {r["quote"] for r in MOCK_ROWS if r["pdf"]}
+        self.assertEqual(set(got), want)                               # incl. the rows that load on scroll
+        for q, f in got.items():
+            self.assertTrue(f["data"].startswith(b"%PDF"))
+            self.assertIn(f"quote {q}".encode(), f["data"])            # each file is its own request's
+            self.assertEqual(f["name"], f"workorder_{q}.pdf")
+            self.assertEqual(f["key"], by_quote[q]["key"])             # …and keyed like the importer keys it
+        rep = extra["report"]
+        self.assertEqual((rep["saved"], len(rep["not_found"]), rep["mismatch"], rep["failed"]),
+                         (len(want), 1, [], []))
+        self.assertIn("Gloves", rep["not_found"][0])
+
+    def test_files_already_stored_are_skipped(self):
+        from budget import autofetch
+        site = MockLabSuit()
+        self.addCleanup(site.stop)
+        by_quote = self.targets_by_quote(site)
+        have = {by_quote["19363"]["key"]: "19363"}
+        _, _, extra = autofetch.fetch_labsuit(site.url, "u", "p", download_seconds=20, attachments=have)
+        self.assertEqual(extra["report"]["skipped"], 1)
+        self.assertNotIn("19363", {f["quote_id"] for f in extra["files"]})
+
+    def test_file_that_opens_in_a_viewer_is_captured_too(self):
+        from budget import autofetch
+        site = MockLabSuit(viewer=True)
+        self.addCleanup(site.stop)
+        _, _, extra = autofetch.fetch_labsuit(site.url, "u", "p", download_seconds=20, attachments={})
+        self.assertEqual({f["quote_id"] for f in extra["files"]}, {r["quote"] for r in MOCK_ROWS if r["pdf"]})
+
+    def test_job_preview_confirm_saves_files_and_serves_them(self):
+        from budget import autofetch
+        from budget.models import AutoFetchJob, OrderFile, PendingFile, SourceCredential
+        site = MockLabSuit()
+        self.addCleanup(site.stop)
+        c = SourceCredential(source="labsuit", username="u")
+        c.set_password("p")
+        c.save()
+        with override_settings(LABSUIT_URLS={"orders": site.url}):
+            job = AutoFetchJob.objects.create(table_key="orders", source="labsuit_orders", created_by="u")
+            autofetch.run_job(job.pk)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "done", job.error)
+        pending = job.pending
+        self.assertEqual(PendingFile.objects.filter(pending=pending).count(), 11)
+        self.assertEqual(OrderFile.objects.count(), 0)                   # nothing attached before the user confirms
+        self.assertEqual(pending.preview["attachments"]["saved"], 11)
+        self.assertContains(self.client.get(f"/import/{pending.pk}/"), "קובצי PDF מ-LabSuit")
+        self.client.post(f"/import/{pending.pk}/confirm/")
+        self.assertEqual(OrderFile.objects.count(), 11)
+        self.assertFalse(PendingFile.objects.exists())
+        o = OrderRequest.objects.get(quote_id="19363")
+        self.assertEqual(o.file.file_name, "workorder_19363.pdf")
+        r = self.client.get(f"/orders/{o.pk}/file/")
+        self.assertEqual((r.status_code, r["Content-Type"]), (200, "application/pdf"))
+        self.assertTrue(r.content.startswith(b"%PDF") and b"quote 19363" in r.content)
+        self.assertContains(self.client.get("/orders/?year=all"), f"/orders/{o.pk}/file/")
+        # second run: everything we hold is skipped, nothing is downloaded again
+        with override_settings(LABSUIT_URLS={"orders": site.url}):
+            job2 = AutoFetchJob.objects.create(table_key="orders", source="labsuit_orders", created_by="u")
+            autofetch.run_job(job2.pk)
+        job2.refresh_from_db()
+        self.assertEqual(job2.pending.preview["attachments"]["skipped"], 11)
+        self.assertEqual(job2.pending.preview["attachments"]["saved"], 0)
+
+
+@override_settings(FX_AUTO_REFRESH=False)
+class HomePageTests(TestCase):
+    """The home page is a normal page of the site: navigation, logout, and the messages of whatever sent you."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user("u", password="p")
+        self.client.login(username="u", password="p")
+
+    def test_home_has_the_site_navigation(self):
+        page = self.client.get("/")
+        self.assertEqual(page.status_code, 200)
+        for label in ("הזמנות ודרישות", "מענקים", "המלצות", "הגדרות", "יציאה"):
+            self.assertContains(page, label)
+        self.assertContains(page, 'href="/orders/"')
+        self.assertContains(page, 'href="/grants/"')
+
+    def test_messages_are_shown_after_redirecting_home(self):
+        # e.g. cancelling an import sends you to "/" with a message
+        from budget.models import PendingImport
+        p = PendingImport.objects.create(table_key="orders", source="labsuit_orders", file_name="x.xlsx",
+                                         data=b"", mode="merge", as_of=TODAY, preview={"counts": {}},
+                                         uploaded_by="u")
+        r = self.client.post(f"/import/{p.pk}/cancel/", follow=True)
+        self.assertContains(r, "העדכון בוטל")
+        self.assertContains(r, "הזמנות ודרישות")             # …on a page with the navigation
+
+    def test_login_lands_on_a_page_with_navigation(self):
+        self.client.logout()
+        r = self.client.post("/login/", {"username": "u", "password": "p"}, follow=True)
+        self.assertContains(r, 'href="/orders/"')

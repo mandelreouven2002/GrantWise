@@ -2,9 +2,8 @@
 
 - Natural key = (date requested, requester, catalog/item name) + occurrence index, because the
   export has no stable ID. Editing those fields in LabSuit creates a 'new' order on next import.
-- PRICE is 0 for almost every row (real prices live in SAP), so the importer estimates an amount:
-  LabSuit TOTAL/PRICE if > 1, else the latest priced order of the same catalog number,
-  else the inventory price of that catalog number.
+- The amount is LabSuit's own price: PRICE, else TOTAL / QUANTITY, when it is > 1. Nothing is estimated:
+  a row without a price has no amount, and gets no recommendation until one is entered.
 - Lab-owned fields (project, category override, manual amount, notes) survive re-imports.
 """
 from collections import Counter
@@ -13,8 +12,8 @@ from decimal import Decimal
 from django.db import transaction
 
 from ..funding import ensure_alias
-from ..models import CategoryMap, ImportBatch, InventoryItem, OrderRequest, Person
-from .common import blank, dec, excel_frames, money, norm_catalog, parse_date, read_bytes, stable_key, text
+from ..models import CategoryMap, ImportBatch, OrderRequest, Person
+from .common import blank, dec, excel_frames, money, parse_date, read_bytes, stable_key, text
 
 ONE = Decimal("1")
 
@@ -30,6 +29,28 @@ def _unit_price(r):
     return None, None
 
 
+def keyed_rows(rows):
+    """[(natural_key, row)]: the key an order gets on import. Shared with the robot that fetches the PDFs,
+    so a file lands on exactly the order it was scraped for."""
+    occurrences, out = Counter(), []
+    for r in rows:
+        base = stable_key(r.get("DATE_REQUESTED"), r.get("REQUESTED_BY"),
+                          r.get("CATALOG_NUMBER") or r.get("ITEM_NAME"), r.get("ITEM_NAME"))
+        occurrences[base] += 1
+        out.append((base if occurrences[base] == 1 else stable_key(base, occurrences[base]), r))
+    return out
+
+
+def scrape_targets(data):
+    """What the robot needs from an orders export: one dict per request, with its natural key."""
+    frames = excel_frames(read_bytes(data))
+    rows = [r for df in frames.values() if "ITEM_NAME" in df.columns
+            for _, r in df.iterrows() if not blank(r.get("ITEM_NAME"))]
+    return [dict(key=k, item_name=text(r.get("ITEM_NAME"), 300), requested_by=text(r.get("REQUESTED_BY"), 150),
+                 catalog_number=text(r.get("CATALOG_NUMBER"), 120), quote_id=text(r.get("QUOTE_ID"), 60))
+            for k, r in keyed_rows(rows)]
+
+
 @transaction.atomic
 def run(f, file_name, as_of, mode="replace", user="", min_year=None):
     frames = excel_frames(read_bytes(f))
@@ -43,37 +64,13 @@ def run(f, file_name, as_of, mode="replace", user="", min_year=None):
 
     rows = [r for _, df in sheets for _, r in df.iterrows() if not blank(r.get("ITEM_NAME"))]
 
-    # price history from the export itself (latest wins) + inventory as fallback
-    history = {}
-    for r in rows:
-        cat = norm_catalog(r.get("CATALOG_NUMBER"))
-        p, cur = _unit_price(r)
-        d = parse_date(r.get("DATE_REQUESTED"))
-        if cat and p and (cat not in history or (d and history[cat][2] and d > history[cat][2])):
-            history[cat] = (p, cur, d)
-    # orders already in the DB (e.g. older years not in this file) also feed the history
-    for o in (OrderRequest.objects.filter(labsuit_total__gt=1).exclude(catalog_number="")
-              .only("catalog_number", "labsuit_total", "quantity", "labsuit_currency", "date_requested")):
-        cat = norm_catalog(o.catalog_number)
-        if cat not in history or (o.date_requested and history[cat][2] and o.date_requested > history[cat][2]):
-            unit = (o.labsuit_total / (o.quantity or ONE)).quantize(Decimal("0.01"))
-            history[cat] = (unit, o.labsuit_currency or "ILS", o.date_requested)
-    inv_prices = {}
-    for it in InventoryItem.objects.filter(price__gt=1).exclude(catalog_number=""):
-        inv_prices.setdefault(norm_catalog(it.catalog_number), (it.price, it.currency or "ILS"))
-
     type_map = {m.value.lower(): m.category_id for m in CategoryMap.objects.filter(source="labsuit_item_type")}
     existing = {o.natural_key: o for o in OrderRequest.objects.filter(source="labsuit")}
-    occurrences = Counter()
     to_create, to_update, untouched, changed_objs, seen = [], [], [], [], set()
     labels, people = set(), set()
     amount_stats = Counter()
 
-    for r in rows:
-        base = stable_key(r.get("DATE_REQUESTED"), r.get("REQUESTED_BY"),
-                          r.get("CATALOG_NUMBER") or r.get("ITEM_NAME"), r.get("ITEM_NAME"))
-        occurrences[base] += 1
-        key = base if occurrences[base] == 1 else stable_key(base, occurrences[base])
+    for key, r in keyed_rows(rows):
         seen.add(key)
 
         qty = dec(r.get("QUANTITY"), ONE) or ONE
@@ -106,19 +103,9 @@ def run(f, file_name, as_of, mode="replace", user="", min_year=None):
             comments=text(r.get("COMMENTS")),
         )
 
-        # amount estimate
+        # the amount is LabSuit's price, or nothing
         p, cur = _unit_price(r)
-        src = OrderRequest.AmountSource.LABSUIT
-        if not p:
-            cat = norm_catalog(r.get("CATALOG_NUMBER"))
-            if cat in history:
-                p, cur, _ = history[cat]
-                src = OrderRequest.AmountSource.HISTORY
-            elif cat in inv_prices:
-                p, cur = inv_prices[cat]
-                src = OrderRequest.AmountSource.INVENTORY
-            else:
-                src = OrderRequest.AmountSource.NONE
+        src = OrderRequest.AmountSource.LABSUIT if p else OrderRequest.AmountSource.NONE
         est = (p * qty).quantize(Decimal("0.01")) if p else None
 
         obj = existing.get(key)
@@ -134,7 +121,8 @@ def run(f, file_name, as_of, mode="replace", user="", min_year=None):
                 if getattr(obj, k) != v:
                     setattr(obj, k, v)
                     dirty = True
-            keep = obj.amount_source == OrderRequest.AmountSource.MANUAL or (est is None and obj.amount_est)
+            keep = obj.amount_source == OrderRequest.AmountSource.MANUAL or (
+                est is None and obj.amount_est and obj.amount_source == OrderRequest.AmountSource.LABSUIT)
             if not keep and (obj.amount_est, obj.amount_currency, obj.amount_source) != (est, cur or "ILS", src):
                 obj.amount_est, obj.amount_currency, obj.amount_source = est, cur or "ILS", src
                 dirty = True

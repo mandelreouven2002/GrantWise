@@ -84,7 +84,15 @@ class Line:
     amount_orig: Decimal               # order currency
     amount_ils: Decimal
     amount_grant: Decimal | None = None
-    reason: str = ""
+    reason: str = ""                   # short lines joined by "\n" (see `explain`)
+
+    @property
+    def reason_main(self):
+        return "\n".join(l for l in self.reason.split("\n") if not l.startswith("הבא בתור"))
+
+    @property
+    def reason_compare(self):
+        return next((l for l in self.reason.split("\n") if l.startswith("הבא בתור")), "")
 
 
 @dataclass
@@ -142,8 +150,10 @@ def submitted_on(alloc):
     """The date the order behind a decision went out: the LabSuit PO date, else the day the user
     marked it 'עודכן במערכות המעבדה'. None = unknown."""
     o = alloc.order
-    if o.po_number and o.date_ordered:
+    if o is not None and o.po_number and o.date_ordered:
         return o.date_ordered
+    if alloc.order_po_date:                 # the order row is gone; this is what its PO said
+        return alloc.order_po_date
     if alloc.lab_updated_at:
         return timezone.localdate(alloc.lab_updated_at)
     return None
@@ -156,13 +166,28 @@ def covered_by_sap(alloc, sap_as_of):
     return d is not None and sap_as_of is not None and d <= sap_as_of
 
 
+def retire_orders(order_ids):
+    """The lab has updated LabSuit / SAP for these orders: the order rows are deleted (they are not in the
+    system any more — a later export brings them back as new requests), while their funding decisions stay
+    on the grants until SAP covers them. Returns how many orders were deleted."""
+    qs = OrderRequest.objects.filter(pk__in=list(order_ids))
+    with transaction.atomic():
+        for o in qs:
+            Allocation.objects.filter(order=o).update(
+                order_label=o.item_name[:300], order_key=o.natural_key,
+                order_po_date=o.date_ordered if o.po_number else None)
+        n = qs.count()
+        qs.delete()                         # allocations: SET_NULL; the stored quote PDF goes with the order
+    return n
+
+
 def mark_written_in_labsuit():
     """The lab funds a request by writing its grant in LabSuit's GRANT_ID. When an imported order
     already carries the grant we decided on, mark the decision 'עודכן במערכות המעבדה' automatically.
     Only single-grant decisions (one GRANT_ID can't express more). Returns the count."""
-    n, now = 0, timezone.now()
+    n, now, marked = 0, timezone.now(), []
     pending = (Allocation.objects.filter(status=Allocation.Status.APPROVED, lab_updated_at__isnull=True,
-                                         grant__isnull=False).select_related("order"))
+                                         grant__isnull=False, order__isnull=False).select_related("order"))
     by_order = defaultdict(set)
     orders = {}
     for a in pending:
@@ -176,6 +201,9 @@ def mark_written_in_labsuit():
         if alias.kind == FundingAlias.Kind.GRANT and alias.grant and alias.grant.number in grants:
             n += Allocation.objects.filter(order_id=oid, status=Allocation.Status.APPROVED).update(
                 lab_updated_at=now, lab_updated_by="LabSuit (GRANT_ID)")
+            marked.append(oid)
+    if marked:
+        retire_orders(marked)               # same as pressing "עודכן במערכות המעבדה"
     return n
 
 
@@ -205,6 +233,11 @@ def unseen_orders(sap_as_of, today=None):
     qs = (OrderRequest.objects.filter(is_current=True, date_ordered__gt=sap_as_of)
           .exclude(po_number="").exclude(status="canceled").exclude(amount_est__isnull=True)
           .exclude(allocations__status=Allocation.Status.APPROVED).distinct())
+    # a decision whose order row was deleted is still reserved: don't subtract the same order a second time
+    reserved_keys = set(Allocation.objects.filter(status=Allocation.Status.APPROVED, order__isnull=True)
+                        .exclude(order_key="").values_list("order_key", flat=True))
+    if reserved_keys:
+        qs = qs.exclude(natural_key__in=reserved_keys)
     for o in qs:
         alias = alias_for(o.grant_label)
         if alias.kind != FundingAlias.Kind.GRANT or not alias.grant:
@@ -281,8 +314,6 @@ def make_candidate(o, today):
     rate, _ = rate_to_ils(o.amount_currency, today)
     c = Candidate(order=o, amount=o.amount_est, currency=o.amount_currency, rate=rate,
                   amount_ils=(o.amount_est * rate).quantize(Q), category=o.category_id or "MATERIAL")
-    if o.amount_source != OrderRequest.AmountSource.LABSUIT:
-        c.notes.append(f"סכום משוער ({o.get_amount_source_display()})")
     return c
 
 
@@ -350,27 +381,87 @@ def cost(c: Candidate, s: GrantState, p):
     return max(val, 0.05), urgency
 
 
-def explain(c, s, avail_cat, urgency, amount_grant, cat_names=None):
-    """Plain-language reason for one recommended line."""
+NEXT_IN_LINE = "הבא בתור"
+
+
+def rank_options(c, states, today, p):
+    """Every eligible grant for one candidate, best (lowest cost) first."""
+    opts = []
+    for s in states.values():
+        ok, _ = eligible(c, s, today)
+        if ok:
+            cst, urg = cost(c, s, p)
+            opts.append(Option(state=s, cost=cst, urgency=urg, avail_cat=s.cat_cap(c.category)))
+    opts.sort(key=lambda o: o.cost)
+    return opts
+
+
+def explain(c, s, avail_cat, urgency, amount_grant, cat_names=None, ranked=None, manual=False):
+    """Plain-Hebrew reason for one recommended line, as short lines joined by "\n":
+         why this grant · what it takes and what is left · ⚠ things to notice · who is next in line.
+    `ranked` is the candidate's eligible options (best first); without it the "only grant" and
+    "next in line" statements are left out."""
     g = s.grant
+    cur = g.currency
     cat = (cat_names or {}).get(c.category, c.category)
-    parts = []
-    if g.end_date:
-        parts.append(f"מסתיים {g.end_date:%d/%m/%Y} (בעוד {s.days_left} ימים)")
-    base = s.total if s.pooled else avail_cat
-    where = "מענק מאגר, כל סעיף" if s.pooled else f"סעיף {cat}"
-    parts.append(f"{where}: זמין {base:,.2f} {g.currency}, אחרי ההקצאה {base - amount_grant:,.2f}")
-    if urgency >= 0.5:
-        parts.append("מועדף כי היתרה בסכנת אי-ניצול")
-    if g.is_reserve:
-        parts.append("מענק רזרבה — נבחר רק כי אין חלופה מתאימה יותר")
-    if g.pi_priority:
-        parts.append(f"עדיפות מרצה {g.pi_priority:+d}")
-    if c.currency != g.currency:
-        parts.append(f"המרה {c.currency}→{g.currency} כולל מרווח ביטחון")
+    others = [o for o in (ranked or []) if o.state.grant.number != g.number]
+
+    # 1. why — one sentence, the first rule that applies
     if c.fixed_grant == g.number:
-        parts.append("נשמר המענק שסומן ב-LabSuit")
-    return " · ".join(parts + c.notes)
+        why = "נשמר המענק שסומן ב-LabSuit."
+    elif urgency >= 0.5 and s.days_left is not None and s.days_left >= 0:
+        why = f"המענק מסתיים בעוד {s.days_left} ימים ויש בו עדיין {s.total:,.0f} {cur}, אז כדאי לנצל אותו לפני שיפוג."
+    elif ranked is not None and not others:
+        why = "זה המענק היחיד שמתאים להזמנה הזו."
+    elif g.pi_priority > 0:
+        why = "הגדרת עדיפות למענק הזה."
+    elif g.is_reserve:
+        why = "אין חלופה מתאימה יותר, ולכן נבחר מענק הרזרבה."
+    elif others:
+        why = f"זו האפשרות המתאימה ביותר מבין {len(others) + 1} מענקים שמתאימים להזמנה."
+    else:
+        why = "זה המענק המתאים ביותר להזמנה הזו."
+
+    # 2. what it takes and what is left
+    base = s.total if s.pooled else avail_cat
+    left = base - amount_grant
+    if s.pooled:
+        impact = f"יורדים ממנו {amount_grant:,.2f} {cur}, ונשארים {left:,.2f} {cur}."
+    else:
+        impact = f"יורדים ממנו {amount_grant:,.2f} {cur} מסעיף {cat}, ונשארים בסעיף {left:,.2f} {cur}."
+
+    # 3. warnings — only when there is something to notice
+    warn = []
+    if c.currency != cur:
+        pct = round(float(settings.RESOLVE_DEFAULTS["fx_margin"]) * 100, 1)
+        warn.append(f"ההזמנה ב-{c.currency} והמענק ב-{cur}. מוסיפים {pct:g}% כגיבוי למקרה שהשער יזוז.")
+    if manual:
+        warn.append("בחרת מענק אחר מההמלצה.")
+    if base > 0 and left / base < Decimal("0.05"):
+        warn.append(f"אחרי ההקצאה נשארת יתרה קטנה ({left:,.0f} {cur}).")
+    if s.days_left is not None and 0 <= s.days_left < 30:
+        warn.append(f"נשארו רק {s.days_left} ימים למענק.")
+    warn += c.notes
+
+    lines = [why, impact] + [f"⚠ {w}" for w in warn]
+
+    # 4. the next grant in line, and why it was left for later
+    if others:
+        n = others[0]
+        ng = n.state.grant
+        t = f"{NEXT_IN_LINE}: {ng.number}"
+        if n.state.days_left is not None and n.state.days_left >= 0:
+            t += f", מסתיים בעוד {n.state.days_left} ימים"
+        if n.urgency < urgency - 0.05:
+            t += ", ולכן עדיף להשאיר אותו לבקשות מאוחרות יותר."
+        elif ng.is_reserve and not g.is_reserve:
+            t += " (מענק רזרבה, עדיף לשמור אותו)."
+        elif ng.currency != c.currency and cur == c.currency:
+            t += f", במטבע שונה מההזמנה ({ng.currency})."
+        else:
+            t += "."
+        lines.append(t)
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- compute (read-only)
@@ -457,7 +548,7 @@ def compute(today=None, sap_as_of=None, **overrides):
             amt_g = to_grant_ccy(ils, c, s, p)
             lines.append(Line(grant=s.grant, amount_orig=(ils / c.rate).quantize(Q), amount_ils=ils,
                               amount_grant=amt_g,
-                              reason=explain(c, s, o.avail_cat, o.urgency, amt_g, cat_names)))
+                              reason=explain(c, s, o.avail_cat, o.urgency, amt_g, cat_names, ranked=options[i])))
             used[num] += amt_g
         short = Decimal(str(pulp.value(u[i]) or 0)).quantize(Q) if cands else Decimal("0")
         if short >= Decimal("0.01"):
@@ -509,7 +600,7 @@ def approve_plans(decisions, user="", today=None, edited=None):
         sap = ImportBatch.latest(ImportBatch.Source.SAP_GRANTS)
         if sap is None:
             raise ApprovalError(["אין יתרות SAP"])
-        states = grant_states(today, sap.as_of, grants=[g for g in grants if g.is_active])
+        states = grant_states(today, sap.as_of)       # all active grants: the chosen ones are locked above
         errors, new_allocs = [], []
         used_total, used_cat = defaultdict(Decimal), defaultdict(Decimal)
         orders = {o.pk: o for o in OrderRequest.objects.select_for_update()
@@ -557,7 +648,8 @@ def approve_plans(decisions, user="", today=None, edited=None):
                               f"מבוקש {amt_g:,.2f} {s.grant.currency}")
                 continue
             urg = cost(c, s, p)[1]
-            reason_txt = explain(c, s, s.cat_cap(c.category) - used_cat[num, c.category], urg, amt_g, cat_names)
+            reason_txt = explain(c, s, s.cat_cap(c.category) - used_cat[num, c.category], urg, amt_g, cat_names,
+                                 ranked=rank_options(c, states, today, p), manual=oid in edited)
             used_total[num] += amt_g
             used_cat[num, c.category] += amt_g
             new_allocs.append(Allocation(
@@ -565,7 +657,7 @@ def approve_plans(decisions, user="", today=None, edited=None):
                 currency_orig=c.currency, amount_ils=ils, amount_grant_ccy=amt_g,
                 fx_rate=(c.rate * (1 + margin_for(c, s, p)) / s.rate).quantize(R6), fx_date=today,
                 status=Allocation.Status.APPROVED, decided_by=user, decided_at=timezone.now(),
-                reason=("נבחר ידנית · " if oid in edited else "") + reason_txt))
+                reason=reason_txt))
         if errors:
             raise ApprovalError(errors)
         run = ResolveRun.objects.create(run_date=today, created_by=user, sap_batch=sap,

@@ -26,7 +26,7 @@
     {% if d.decisions %}
     <div class="tbl-wrap" style="max-height:260px"><table>
       <tr><th>הזמנה</th><th>סעיף</th><th class="num">סכום בהזמנה</th><th class="num">במטבע המענק</th><th>מצב</th><th>אושר</th></tr>
-      {% for a in d.decisions %}<tr><td class="ro">{{ a.order.item_name|truncatechars:50 }}</td><td class="ro">{{ a.category.name_he }}</td>
+      {% for a in d.decisions %}<tr><td class="ro">{{ a.item_name|truncatechars:50 }}</td><td class="ro">{{ a.category.name_he }}</td>
         <td class="ro num">{{ a.amount_orig|money:2 }} {{ a.currency_orig }}</td>
         <td class="ro num">{{ a.amount_grant_ccy|money:2 }} {{ d.grant.currency }}</td>
         <td class="ro"><span class="tag {% if a.status == 'approved' %}warn{% else %}good{% endif %}">{% if a.status == 'approved' %}{% if a.lab_updated_at %}עודכן במעבדה, ממתין ל-SAP{% else %}ממתין ל-SAP{% endif %}{% else %}כלול ביתרת SAP{% endif %}</span></td>

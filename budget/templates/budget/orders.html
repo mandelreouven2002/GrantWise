@@ -1,7 +1,7 @@
 {% extends "budget/base.html" %}
 {% block title %}הזמנות ודרישות · LabFund{% endblock %}
 {% block content %}
-<div class="titlebar"><h1>הזמנות ודרישות <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">ב-LabSuit כמעט אין מחירים — "סכום" מושלם ממחיר קודם של אותו מק״ט, ואפשר לתקן אותו כאן. סכום שהוזן ידנית לא נדרס בעדכון מקובץ.</span></span></h1>{% include "budget/_lastimport.html" %}<span class="spacer"></span>{% include "budget/_actions.html" with default_mode="replace" %}</div>
+<div class="titlebar"><h1>הזמנות ודרישות <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הסכום נלקח מהמחיר ב-LabSuit, ואפשר לתקן אותו כאן. בקשה בלי סכום לא מקבלת המלצה עד שמזינים אותו. סכום שהוזן ידנית לא נדרס בעדכון מקובץ.</span></span></h1>{% include "budget/_lastimport.html" %}<span class="spacer"></span>{% include "budget/_actions.html" with default_mode="replace" %}</div>
 <form class="toolbar" method="get">
   <input class="f" name="q" value="{{ request.GET.q }}" placeholder="חיפוש: פריט, מק״ט, ספק, הזמנת רכש, מבקש">
   <select class="f" name="year" onchange="this.form.submit()">{% for y in years %}<option value="{{ y }}" {% if y|stringformat:"s" == year %}selected{% endif %}>{{ y }}</option>{% endfor %}<option value="all" {% if year == "all" %}selected{% endif %}>כל השנים</option></select>

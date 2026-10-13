@@ -4,6 +4,12 @@
     → click "Export" → the site's popup → "Export" again → wait for the download (up to a minute)
     → the file goes through the normal Merge preview; nothing is saved until the user confirms.
 
+Orders only, in the same session and right after the export: for every request in the file, the robot
+loads the whole list (it scrolls), clicks the request's name, and takes the one PDF listed under "Files"
+in the side panel (LabSuit's supplier quote). The files wait with the preview and are attached to the
+orders when the user confirms. A request that cannot be found, or whose file does not match its quote
+number, is reported and skipped — never attached to the wrong order.
+
 Elements are found by their text ("Login", "Export"), not by screen position, so a layout change
 does not break the robot — a renamed button does. Any failure ends the job with a plain message
 (and a screenshot of that moment) so the user can fall back to a manual file update.
@@ -11,18 +17,20 @@ does not break the robot — a renamed button does. Any failure ends the job wit
 import logging
 import re
 import threading
+import time
 from datetime import date
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from django.conf import settings
 from django.db import close_old_connections, connection
 from django.utils import timezone
 
-from .models import AutoFetchJob, PendingImport, SourceCredential
+from .models import AutoFetchJob, ImportBatch, OrderFile, PendingFile, PendingImport, SourceCredential
 
 log = logging.getLogger(__name__)
 EXPORT = re.compile(r"^\s*export\s*$", re.I)
 LOGIN = re.compile(r"^\s*(log\s*in|sign\s*in)\s*$", re.I)
+PDF_NAME = re.compile(r"\.pdf\s*$", re.I)
 
 
 class AutoFetchError(Exception):
@@ -43,8 +51,211 @@ def _first_visible(scope, pattern, timeout):
     return loc
 
 
-def fetch_labsuit(url, username, password, step=lambda s: None, download_seconds=60, headless=True):
-    """Returns (file bytes, suggested file name). Raises AutoFetchError with a Hebrew message."""
+
+# --------------------------------------------------------------------------- attachments (PDF per request)
+
+def _norm(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+
+
+def _load_whole_list(page, rounds=80):
+    """LabSuit's list loads more requests as you scroll: scroll until nothing new appears."""
+    last, stable = -1, 0
+    for _ in range(rounds):
+        height = page.evaluate("() => document.documentElement.scrollHeight")
+        page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+        page.mouse.wheel(0, 4000)
+        page.wait_for_timeout(600)
+        stable = stable + 1 if height == last else 0
+        if stable >= 3:
+            break
+        last = height
+    page.evaluate("() => window.scrollTo(0, 0)")
+
+
+_CARD_TEXT_JS = """(els) => {
+  els.forEach(e => e.setAttribute('data-lf-cand', '1'));
+  const out = els.map(e => {            // the request's card = the widest ancestor holding only this title
+    let n = e;
+    while (n.parentElement && n.parentElement.querySelectorAll('[data-lf-cand]').length === 1) n = n.parentElement;
+    return n.innerText || '';
+  });
+  els.forEach(e => e.removeAttribute('data-lf-cand'));
+  return out;
+}"""
+
+
+def _request_title(page, target):
+    """The clickable name of one request on the (fully loaded) list, or (None, reason).
+    Requests that share a name are told apart by the quote number, catalog number and requester in
+    their card; when that is not enough the request is skipped rather than guessed."""
+    title = target["item_name"]
+    cands = page.get_by_text(title, exact=True).filter(visible=True)
+    if not cands.count():
+        cands = page.get_by_text(re.compile(r"^\s*" + re.escape(title) + r"\s*$", re.I)).filter(visible=True)
+    n = cands.count()
+    if n == 0:
+        return None, "לא נמצאה ברשימה"
+    if n == 1:
+        return cands.first, ""
+    cards = cands.evaluate_all(_CARD_TEXT_JS)
+    scores = []
+    for text in cards:
+        t = _norm(text)
+        s = 0
+        if target["quote_id"] and target["quote_id"].lower() in t:
+            s += 4
+        if target["catalog_number"] and _norm(target["catalog_number"]) in t:
+            s += 2
+        if target["requested_by"] and _norm(target["requested_by"]) in t:
+            s += 1
+        scores.append(s)
+    best = max(scores)
+    if best >= 2 and scores.count(best) == 1:
+        return cands.nth(scores.index(best)), ""
+    return None, "כמה בקשות באותו שם ולא ניתן להבדיל ביניהן"
+
+
+def _read_pdf(page, ctx, link, seen, timeout_ms):
+    """The PDF behind a file link in the side panel: (bytes, name). Tries the link's own URL first (same
+    logged-in session), then clicks it and takes whatever arrives — a download, or a PDF the viewer loads."""
+    name = (link.inner_text() or "").strip()
+    href = link.get_attribute("href")
+    if href and not href.lower().startswith(("javascript:", "#", "blob:", "data:")):
+        try:
+            resp = ctx.request.get(urljoin(page.url, href))
+            body = resp.body()
+            if resp.ok and body[:4] == b"%PDF":
+                return body, name
+        except Exception:  # noqa: BLE001 — fall through to clicking
+            pass
+    n_dl, n_pdf = len(seen["downloads"]), len(seen["pdfs"])
+    link.click()
+    waited = 0
+    while waited < timeout_ms:
+        for dl in seen["downloads"][n_dl:]:
+            try:
+                body = open(dl.path(), "rb").read()
+            except Exception:  # noqa: BLE001
+                continue
+            if body[:4] == b"%PDF":
+                return body, dl.suggested_filename or name
+        for resp in seen["pdfs"][n_pdf:]:
+            try:
+                body = resp.body()
+            except Exception:  # noqa: BLE001 — the body of a navigation that became a download
+                continue
+            if body[:4] == b"%PDF":
+                return body, name
+        src = page.evaluate("() => { const e = document.querySelector('iframe[src], embed[src], object[data]');"
+                            " return e ? (e.src || e.data || '') : '' }")
+        if src.startswith(("http://", "https://")):
+            try:
+                resp = ctx.request.get(src)
+                body = resp.body()
+                if resp.ok and body[:4] == b"%PDF":
+                    return body, name
+            except Exception:  # noqa: BLE001
+                pass
+        page.wait_for_timeout(300)
+        waited += 300
+    raise AutoFetchError("הקובץ לא הגיע")
+
+
+def _close_panel(page):
+    """Leave the side panel closed, so the next request cannot be read from the previous one's file."""
+    links = page.locator("a").filter(has_text=PDF_NAME).filter(visible=True)
+    for _ in range(3):
+        if not links.count():
+            return True
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        if links.count():
+            closer = page.get_by_role("button", name=re.compile(r"^\s*(close|×|✕|x|סגור)\s*$", re.I)).filter(visible=True)
+            if closer.count():
+                closer.first.click()
+                page.wait_for_timeout(300)
+    return not links.count()
+
+
+def scrape_attachments(page, ctx, data, have, step, max_seconds, seen, panel_seconds=6, refetch=False):
+    """One PDF per request in the export, from the side panel of the orders list.
+    `have` = {natural_key: quote_id} of files we already store (skipped unless refetch).
+    Returns {"files": [dict(key, quote_id, name, data)], "report": {...}}; never raises."""
+    from playwright.sync_api import Error as PwError
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    from .importers.labsuit_orders import scrape_targets
+
+    report = dict(saved=0, skipped=0, not_found=[], mismatch=[], failed=[], stopped=0, error="")
+    files = []
+    try:
+        targets = scrape_targets(data)
+    except Exception as e:  # noqa: BLE001
+        report["error"] = f"קריאת הבקשות מהקובץ נכשלה: {e}"
+        return dict(files=files, report=report)
+
+    todo = []
+    for t in targets:
+        if not refetch and t["key"] in have and (not t["quote_id"] or have[t["key"]] == t["quote_id"]):
+            report["skipped"] += 1
+        else:
+            todo.append(t)
+    if not todo:
+        return dict(files=files, report=report)
+
+    started = time.monotonic()
+    try:
+        step("טוען את כל רשימת הבקשות")
+        _load_whole_list(page)
+    except (PwError, PwTimeout) as e:
+        report["error"] = f"טעינת הרשימה נכשלה: {str(e)[:200]}"
+        return dict(files=files, report=report)
+
+    for i, t in enumerate(todo, 1):
+        if time.monotonic() - started > max_seconds:
+            report["stopped"] = len(todo) - i + 1
+            break
+        step(f"שומר קובץ PDF {i}/{len(todo)}")
+        label = t["item_name"][:60]
+        try:
+            title, why = _request_title(page, t)
+            if title is None:
+                report["not_found"].append(f"{label} — {why}")
+                continue
+            title.click()
+            link = page.locator("a").filter(has_text=PDF_NAME).filter(visible=True)
+            try:
+                link.first.wait_for(state="visible", timeout=panel_seconds * 1000)
+            except PwTimeout:
+                report["not_found"].append(f"{label} — אין קובץ מצורף")
+                continue
+            body, name = _read_pdf(page, ctx, link.first, seen, 20_000)
+            if t["quote_id"] and t["quote_id"] not in name:
+                report["mismatch"].append(f"{label} — הקובץ {name} לא תואם להצעה {t['quote_id']}")
+                continue
+            files.append(dict(key=t["key"], quote_id=t["quote_id"], name=name or "quote.pdf", data=body))
+            report["saved"] += 1
+        except AutoFetchError as e:
+            report["failed"].append(f"{label} — {e}")
+        except (PwError, PwTimeout) as e:
+            report["failed"].append(f"{label} — {str(e).splitlines()[0][:120]}")
+        finally:
+            try:
+                if not _close_panel(page):
+                    page.reload(wait_until="domcontentloaded")
+                    page.wait_for_timeout(1500)
+                    _load_whole_list(page)
+            except (PwError, PwTimeout):
+                pass
+    return dict(files=files, report=report)
+
+
+def fetch_labsuit(url, username, password, step=lambda s: None, download_seconds=60, headless=True,
+                  attachments=None):
+    """Returns (file bytes, suggested file name), or — with `attachments` ({natural_key: quote_id} of the
+    PDFs already stored) — (file bytes, file name, {"files": [...], "report": {...}}), the PDFs scraped
+    right after the export. Raises AutoFetchError with a Hebrew message."""
     from playwright.sync_api import Error as PwError
     from playwright.sync_api import TimeoutError as PwTimeout
     from playwright.sync_api import sync_playwright
@@ -65,9 +276,18 @@ def fetch_labsuit(url, username, password, step=lambda s: None, download_seconds
         ctx = browser.new_context(accept_downloads=True, viewport={"width": 1440, "height": 900}, locale="en-US")
         page = ctx.new_page()
         page.set_default_timeout(30_000)
-        downloads = []
+        downloads, pdfs = [], []
         ctx.on("page", lambda pg: pg.on("download", lambda d: downloads.append(d)))
         page.on("download", lambda d: downloads.append(d))
+
+        def on_response(resp):
+            try:
+                ct = (resp.headers.get("content-type") or "").lower()
+            except Exception:  # noqa: BLE001
+                return
+            if "application/pdf" in ct:
+                pdfs.append(resp)
+        ctx.on("response", on_response)
 
         def fail(message, exc=None):
             shot = None
@@ -151,7 +371,15 @@ def fetch_labsuit(url, username, password, step=lambda s: None, download_seconds
             if dl.failure():
                 fail(f"ההורדה מ-LabSuit נכשלה: {dl.failure()}")
             data = open(dl.path(), "rb").read()
-            return data, dl.suggested_filename or "labsuit-export.xlsx"
+            fname = dl.suggested_filename or "labsuit-export.xlsx"
+            if attachments is None:
+                return data, fname
+            # same session, still on the orders list: the PDF behind every request
+            extra = scrape_attachments(page, ctx, data, attachments, step, settings.AUTOFETCH_PDF_SECONDS,
+                                       dict(downloads=downloads, pdfs=pdfs),
+                                       panel_seconds=settings.AUTOFETCH_PDF_PANEL_SECONDS,
+                                       refetch=settings.AUTOFETCH_PDF_REFETCH)
+            return data, fname, extra
         except AutoFetchError:
             raise
         except PwError as e:
@@ -161,6 +389,9 @@ def fetch_labsuit(url, username, password, step=lambda s: None, download_seconds
                 browser.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+_REAL_FETCH = fetch_labsuit       # the real robot (a stand-in passed in or patched must not get PDF arguments)
 
 
 # --------------------------------------------------------------------------- jobs
@@ -233,8 +464,13 @@ def run_job(job_id, fetch=None):
         if not user or not pw:
             raise AutoFetchError("חסרים שם משתמש וסיסמה ל-LabSuit.")
         url = settings.LABSUIT_URLS[job.table_key]
-        data, name = (fetch or fetch_labsuit)(url, user, pw, step=step,
-                                              download_seconds=settings.AUTOFETCH_DOWNLOAD_SECONDS)
+        robot = fetch or fetch_labsuit
+        kwargs = {}
+        if robot is _REAL_FETCH and settings.AUTOFETCH_PDFS and job.source == ImportBatch.Source.LABSUIT_ORDERS:
+            kwargs["attachments"] = stored_attachments()          # the PDFs we already have
+        res = robot(url, user, pw, step=step, download_seconds=settings.AUTOFETCH_DOWNLOAD_SECONDS, **kwargs)
+        data, name = res[0], res[1]
+        extra = res[2] if len(res) > 2 else {}
         job.file_data, job.file_name = data, name
         step("מכין תצוגה מקדימה")
         pending = PendingImport.objects.create(
@@ -248,6 +484,12 @@ def run_job(job_id, fetch=None):
         if not pending.preview["counts"]["in_file"]:
             pending.delete()
             raise _wrong_file(job, data)
+        files = extra.get("files") or []
+        if files:
+            PendingFile.objects.bulk_create([PendingFile(pending=pending, natural_key=f["key"], quote_id=f["quote_id"],
+                                                         file_name=f["name"][:255], data=f["data"]) for f in files])
+        if extra.get("report"):
+            pending.preview["attachments"] = extra["report"]
         pending.save(update_fields=["preview"])
         job.pending, job.status = pending, AutoFetchJob.Status.DONE
     except AutoFetchError as e:
@@ -260,6 +502,28 @@ def run_job(job_id, fetch=None):
     job.save()
     if not settings.AUTOFETCH_SYNC:
         connection.close()
+
+
+def stored_attachments():
+    """{natural_key: quote_id} for the orders that already have a stored PDF (no need to fetch them again)."""
+    return {k: q for k, q in OrderFile.objects.values_list("order__natural_key", "quote_id")}
+
+
+def attach_pending_files(pending):
+    """On confirm: the scraped PDFs become the file of their orders. Returns how many were attached."""
+    from .models import OrderRequest
+    n = 0
+    orders = {o.natural_key: o for o in OrderRequest.objects.filter(
+        natural_key__in=list(pending.files.values_list("natural_key", flat=True)))}
+    for pf in pending.files.all():
+        o = orders.get(pf.natural_key)
+        if o is None:
+            continue
+        data = bytes(pf.data)
+        OrderFile.objects.update_or_create(order=o, defaults=dict(
+            quote_id=pf.quote_id, file_name=pf.file_name, data=data, size=len(data), fetched_at=timezone.now()))
+        n += 1
+    return n
 
 
 def start_job(job):
