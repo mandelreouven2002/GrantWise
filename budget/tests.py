@@ -296,6 +296,13 @@ class ResolveTests(TestCase):
         self.assertFalse(Allocation.objects.exists())
         self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("50000"))
 
+    def test_approval_locks_only_the_main_table(self):
+        """PostgreSQL rejects SELECT … FOR UPDATE over a nullable join ("cannot be applied to the nullable side
+        of an outer join"), which SQLite cannot show: the lock must be limited to the main table."""
+        for qs in (resolve.locked_grants(["A", "L"]), resolve.locked_orders([1, 2])):
+            self.assertTrue(qs.query.select_for_update)
+            self.assertEqual(qs.query.select_for_update_of, ("self",))
+
     def test_double_approval_refused(self):
         o = self.order("100")
         resolve.approve_plans({o.pk: "L"}, today=TODAY)

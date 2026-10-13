@@ -77,6 +77,18 @@ STORAGES = {
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# With DEBUG off Django mails request errors to admins (none configured) and prints nothing, so a 500 on
+# Railway left no trace. Put the traceback on stdout, where Railway's logs show it.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "loggers": {
+        "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
+        "budget": {"handlers": ["console"], "level": "INFO", "propagate": False},
+    },
+}
 LOGIN_URL = "/login/"
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/login/"

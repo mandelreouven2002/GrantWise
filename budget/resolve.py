@@ -577,6 +577,18 @@ def compute(today=None, sap_as_of=None, **overrides):
 
 # --------------------------------------------------------------------------- approve (writes)
 
+def locked_grants(numbers):
+    """The grants to lock for an approval. `of=("self",)`: PostgreSQL refuses FOR UPDATE on a query that
+    joins a nullable relation unless the lock is limited to the main table (SQLite has no row locks and
+    ignores this), so any select_related stays on the unlocked side."""
+    return Grant.objects.select_for_update(of=("self",)).filter(number__in=numbers)
+
+
+def locked_orders(ids):
+    """The orders being approved, locked (see `locked_grants` for why of=("self",))."""
+    return OrderRequest.objects.select_for_update(of=("self",)).filter(pk__in=ids).select_related("project")
+
+
 class ApprovalError(Exception):
     def __init__(self, errors):
         super().__init__("; ".join(errors))
@@ -596,15 +608,14 @@ def approve_plans(decisions, user="", today=None, edited=None):
     cat_names = dict(BudgetCategory.objects.values_list("code", "name_he"))
     nums = {n for n in decisions.values() if n}
     with transaction.atomic():
-        grants = list(Grant.objects.select_for_update().filter(number__in=nums).select_related("last_batch"))
+        list(locked_grants(nums))                      # the chosen grants are locked until the transaction ends
         sap = ImportBatch.latest(ImportBatch.Source.SAP_GRANTS)
         if sap is None:
             raise ApprovalError(["אין יתרות SAP"])
         states = grant_states(today, sap.as_of)       # all active grants: the chosen ones are locked above
         errors, new_allocs = [], []
         used_total, used_cat = defaultdict(Decimal), defaultdict(Decimal)
-        orders = {o.pk: o for o in OrderRequest.objects.select_for_update()
-                  .filter(pk__in=decisions.keys()).select_related("project")}
+        orders = {o.pk: o for o in locked_orders(decisions.keys())}
         approved_already = set(Allocation.objects.filter(order_id__in=decisions.keys(),
                                                          status=Allocation.Status.APPROVED)
                                .values_list("order_id", flat=True))
