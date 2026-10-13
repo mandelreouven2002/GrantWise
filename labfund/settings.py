@@ -105,3 +105,8 @@ LABSUIT_URLS = {
 }
 AUTOFETCH_DOWNLOAD_SECONDS = int(os.environ.get("AUTOFETCH_DOWNLOAD_SECONDS", "60"))
 AUTOFETCH_SYNC = False        # tests run the job inline instead of in a background thread
+# The robot also saves the PDF attached to every request (orders only). Files we already hold are skipped.
+AUTOFETCH_PDFS = os.environ.get("AUTOFETCH_PDFS", "1") == "1"
+AUTOFETCH_PDF_SECONDS = int(os.environ.get("AUTOFETCH_PDF_SECONDS", "1500"))     # total time budget for the PDFs
+AUTOFETCH_PDF_REFETCH = os.environ.get("AUTOFETCH_PDF_REFETCH", "0") == "1"      # 1 = fetch all again
+AUTOFETCH_PDF_PANEL_SECONDS = int(os.environ.get("AUTOFETCH_PDF_PANEL_SECONDS", "6"))  # wait for the side panel's file

@@ -20,6 +20,18 @@
   <form method="post" action="{% url 'import_mode' p.pk %}" class="inline">{% csrf_token %}<button class="btn link">להציג עם {% if p.mode == "replace" %}Merge{% else %}Replace{% endif %} במקום</button></form>
 </div>
 
+{% if v.attachments %}{% with a=v.attachments %}
+<details class="card" {% if a.not_found or a.mismatch or a.failed or a.stopped or a.error %}open{% endif %}>
+  <summary><b>קובצי PDF מ-LabSuit:</b> {{ a.saved }} הורדו{% if a.skipped %}, {{ a.skipped }} כבר שמורים{% endif %}{% if a.not_found %}, {{ a.not_found|length }} בלי קובץ או לא נמצאו{% endif %}{% if a.mismatch %}, {{ a.mismatch|length }} לא תואמים{% endif %}{% if a.failed %}, {{ a.failed|length }} נכשלו{% endif %}
+    <span class="muted">— הקבצים יישמרו ליד ההזמנות רק באישור העדכון</span></summary>
+  {% if a.error %}<p class="reason"><span class="tag bad">שגיאה</span> {{ a.error }}</p>{% endif %}
+  {% if a.stopped %}<p class="reason">נגמר הזמן המוקצב: {{ a.stopped }} בקשות לא נבדקו. אפשר להריץ שוב, והקבצים השמורים ידולגו.</p>{% endif %}
+  {% if a.not_found %}<p class="reason"><b>בלי קובץ או לא נמצאו:</b></p><ul>{% for x in a.not_found|slice:":30" %}<li class="reason">{{ x }}</li>{% endfor %}</ul>{% endif %}
+  {% if a.mismatch %}<p class="reason"><b>קובץ שלא תואם למספר ההצעה (לא נשמר):</b></p><ul>{% for x in a.mismatch|slice:":30" %}<li class="reason">{{ x }}</li>{% endfor %}</ul>{% endif %}
+  {% if a.failed %}<p class="reason"><b>נכשלו:</b></p><ul>{% for x in a.failed|slice:":30" %}<li class="reason">{{ x }}</li>{% endfor %}</ul>{% endif %}
+</details>
+{% endwith %}{% endif %}
+
 {% with c=v.counts %}
 <div class="kpis">
   <div class="kpi"><b>{{ c.new }}</b><span>{% if v.per_batch %}שורות חדשות בדוח{% else %}חדשות{% endif %}</span></div>

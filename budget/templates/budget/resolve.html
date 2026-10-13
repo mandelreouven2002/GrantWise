@@ -71,7 +71,7 @@
     {% with c=r.cells.project %}{% include "budget/_cell.html" %}{% endwith %}
     <td class="ro" style="white-space:normal">
       {% if r.state == "noamount" %}
-        <span class="tag warn">חסר סכום</span> <span class="reason">הזינו סכום משוער בעמודת "סכום" — ההמלצה תחושב מיד</span>
+        <span class="tag warn">חסר סכום</span> <span class="reason">הזינו סכום בעמודת "סכום" — ההמלצה תחושב מיד</span>
       {% elif r.state == "skipped" %}
         <span class="tag warn">לא בחישוב</span> <span class="reason">{{ r.note }}</span>
       {% elif r.state == "standing" %}
@@ -81,17 +81,19 @@
         <div class="reason">{% for num, why in r.why_not %}{{ num }}: {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>
       {% else %}
         {% if r.state == "unfunded" %}
-        <span class="tag bad">אין מקור מספיק</span> <span class="reason">{{ r.lines.0.reason }}</span>
+        <span class="tag bad">אין מקור מספיק</span> <span class="reason">{{ r.lines.0.reason_main|linebreaksbr }}</span>
         {% else %}
         <div class="lines" data-order="{{ r.order.id }}">
           <div class="line">
             <select class="f lg" name="g_{{ r.order.id }}">{% for op in r.options %}<option value="{{ op.num }}" {% if op.num == r.lines.0.grant.number %}selected{% endif %}>{{ op.num }} · {{ op.currency }}{% if op.rank == 1 %} ★{% endif %}</option>{% endfor %}</select>
+            <span class="muted lsponsor">{{ r.lines.0.grant.sponsor|truncatechars:34 }}</span>
             <span class="muted lconv"></span>
-            <div class="reason lreason">{{ r.lines.0.reason }}</div>
+            <div class="reason lreason">{{ r.lines.0.reason_main|linebreaksbr }}</div>
           </div>
         </div>
         {% endif %}
-        <details style="margin-top:6px"><summary class="muted">פירוט: {{ r.options|length }} מענקים כשירים{% if r.why_not %}, {{ r.why_not|length }} נפסלו{% endif %}</summary>
+        <details style="margin-top:6px"><summary class="muted">פירוט והשוואה: {{ r.options|length }} מענקים כשירים{% if r.why_not %}, {{ r.why_not|length }} נפסלו{% endif %}</summary>
+          {% if r.lines.0.reason_compare %}<div class="reason" style="margin-top:6px">{{ r.lines.0.reason_compare }}</div>{% endif %}
           <table style="margin-top:6px">
             <tr><th>#</th><th>מענק</th><th>מסתיים</th><th class="num">זמין בסעיף</th><th class="num">זמין כולל</th><th>הערות</th></tr>
             {% for op in r.options %}<tr><td class="ro">{{ op.rank }}</td><td class="ro"><b>{{ op.num }}</b> <span class="muted">{{ op.label }}</span></td>
@@ -124,7 +126,7 @@
       <div class="reason">{{ g.order.supplier }} · {{ g.order.requested_by }} · {{ g.order.date_requested|date:"d/m/Y" }}</div>
       <div class="reason">{{ g.order.amount_est|money:2 }} {{ g.order.amount_currency }}</div></td>
     <td class="ro" style="white-space:normal">{% for a in g.lines %}<div><b>{{ a.grant_id }}</b> · {{ a.amount_grant_ccy|money:2 }} {{ a.grant.currency }}{% if g.lines|length > 1 %} <span class="muted">({{ a.amount_orig|money:2 }} {{ a.currency_orig }})</span>{% endif %}</div>{% endfor %}</td>
-    <td class="ro reason" style="white-space:normal;min-width:260px">{% for a in g.lines %}<div>{% if g.lines|length > 1 %}<b>{{ a.grant_id }}:</b> {% endif %}{{ a.reason|default:"—" }}</div>{% endfor %}</td>
+    <td class="ro reason" style="white-space:normal;min-width:260px">{% for a in g.lines %}<div>{% if g.lines|length > 1 %}<b>{{ a.grant_id }}:</b> {% endif %}{{ a.reason|default:"—"|linebreaksbr }}</div>{% endfor %}</td>
     <td class="ro num">{{ g.then|money:0 }}{% if g.drift %}<div class="reason"><span class="tag warn">השתנה</span> היום ≈ {{ g.now|money:0 }}</div>{% endif %}</td>
     <td class="ro">{{ g.decided_by }} · {{ g.decided_at|date:"d/m/Y H:i" }}</td>
     <td class="ro"><form method="post" action="{% url 'allocation_lab_updated' g.pk %}" class="inline" onsubmit="return confirm('ההזמנה תוסר מהסל ולא תופיע יותר במערכת. הסכום יישאר מנוכה מהמענק. להמשיך?')">{% csrf_token %}<button class="btn small ghost">עודכן במערכות המעבדה</button></form></td>
@@ -153,7 +155,8 @@
       const pick = tr.querySelector('.pick'), sel = tr.querySelector('.lg');
       if(!o || !sel){ return; }                       // no recommendation for this row
       const n = sel.value, g = D.grants[n];
-      const conv = tr.querySelector('.lconv');
+      const conv = tr.querySelector('.lconv'), sp = tr.querySelector('.lsponsor');
+      if(sp && g){ sp.textContent = g.label; }
       if(g){
         const ag = toGrant(o, g, o.amount);           // the whole order is funded from this one grant
         conv.textContent = o.cur !== g.cur ? `= ${fmt(ag)} ${g.cur}` : '';
@@ -207,7 +210,7 @@
   }
 
   document.addEventListener('change', e => {
-    if(e.target.matches('.lg')){ markEdited(e.target); const r = e.target.closest('.line').querySelector('.lreason'); if(r) r.textContent = 'נבחר ידנית'; recalc(); }
+    if(e.target.matches('.lg')){ markEdited(e.target); const r = e.target.closest('.line').querySelector('.lreason'); if(r) r.textContent = 'בחרת מענק אחר מההמלצה.'; recalc(); }
     if(e.target.matches('.pick')) recalc();
   });
   document.getElementById('refresh-btn')?.addEventListener('click', () => { location.href = location.pathname + location.search; });

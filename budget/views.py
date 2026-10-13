@@ -1,6 +1,7 @@
 import json
 from collections import defaultdict
 from datetime import date, timedelta
+from urllib.parse import quote
 from decimal import Decimal
 
 from django.conf import settings
@@ -23,7 +24,7 @@ from . import resolve as resolver
 from .fx import MissingRate, rate_to_ils
 from .importers import run_import
 from .importers.preview import dry_run
-from .models import (Allocation, AutoFetchJob, PendingImport, SourceCredential, BudgetCategory, FxRate, Grant, ImportBatch, InventoryItem, OrderRequest,
+from .models import (Allocation, AutoFetchJob, OrderFile, PendingImport, SourceCredential, BudgetCategory, FxRate, Grant, ImportBatch, InventoryItem, OrderRequest,
                      Project, ResolveRun, TrackedCurrency)
 from .tables import ADMIN_ONLY, TABLES, cell, choices_for, create_row, filtered, last_import, set_value
 
@@ -209,10 +210,27 @@ def orders_view(request):
         qs = qs.filter(pk__in=_awaiting_decision().values("pk"))
     qs = filtered(TABLES["orders"], qs, g).order_by("-date_requested", "-id")
     t = table_ctx("orders", qs, request)
+    stored = dict(OrderFile.objects.filter(order_id__in=[r["pk"] for r in t["rows"]])
+                  .values_list("order_id", "file_name"))
+    for r in t["rows"]:              # the calculated "quote PDF" column: a link to the stored file
+        if r["pk"] in stored:
+            for c in r["cells"]:
+                if c["col"].field == "quote_pdf":
+                    c["value"] = format_html('<a href="{}" target="_blank" rel="noopener" title="{}">📎 PDF</a>',
+                                             reverse("order_file", args=[r["pk"]]), stored[r["pk"]])
     return render(request, "budget/orders.html", dict(
         t=t, total=qs.count(), years=years, year=year,
         in_bin=(Allocation.objects.filter(status=Allocation.Status.APPROVED, lab_updated_at__isnull=True,
                                           order__is_current=True).values("order_id").distinct().count())))
+
+
+@login_required
+def order_file(request, pk):
+    """The PDF LabSuit has attached to this request (the supplier's quote), served inline."""
+    f = get_object_or_404(OrderFile, order_id=pk)
+    resp = HttpResponse(bytes(f.data), content_type="application/pdf")
+    resp["Content-Disposition"] = "inline; filename*=UTF-8''" + quote(f.file_name or "quote.pdf")
+    return resp
 
 
 def _resolve_params(request):
@@ -338,7 +356,7 @@ def resolve_approve(request):
 def allocation_recycle(request, pk):
     """Recycle: the order was not really approved after all — drop the decision (its frozen amounts and
     rates) and send the order back to the orders page, where the next recommendation prices it afresh."""
-    a = get_object_or_404(Allocation, pk=pk, status=Allocation.Status.APPROVED)
+    a = get_object_or_404(Allocation, pk=pk, status=Allocation.Status.APPROVED, order__isnull=False)
     Allocation.objects.filter(order=a.order, status=Allocation.Status.APPROVED).update(
         status=Allocation.Status.REJECTED, decided_by=request.user.get_username(), decided_at=timezone.now())
     messages.success(request, f"הוחזר להזמנות ודרישות: {a.order.item_name}. "
@@ -349,19 +367,23 @@ def allocation_recycle(request, pk):
 @login_required
 @require_POST
 def allocation_lab_updated(request, pk):
-    """Toggle 'עודכן במערכות המעבדה' for every approved line of the decision's order."""
+    """'עודכן במערכות המעבדה': the order is deleted from the system. Its funding stays on the grant
+    (reserved) until a SAP report covers it. There is no way back — a later export brings the request again
+    as a new one."""
     a = get_object_or_404(Allocation, pk=pk, status=Allocation.Status.APPROVED)
-    lines = Allocation.objects.filter(order=a.order, status=Allocation.Status.APPROVED)
-    if a.lab_updated_at:
-        lines.update(lab_updated_at=None, lab_updated_by="")
-        messages.success(request, f"הסימון בוטל והחזיר לסל המחזור: {a.order.item_name}")
-    else:
-        lines.update(lab_updated_at=timezone.now(), lab_updated_by=request.user.get_username())
-        n = resolver.reconcile()
-        tail = " ההחלטה כבר כלולה ביתרת SAP האחרונה." if n else " הסכום נשאר שמור עד שדוח SAP יכסה את ההזמנה."
-        messages.success(request, f"סומן כעודכן במערכות המעבדה והוסר מסל המחזור: {a.order.item_name}. "
-                                  f"הסכום נשאר מנוכה מהמענק.{tail}")
-    return redirect(request.POST.get("next") or "resolve")
+    nxt = request.POST.get("next") or "resolve"
+    if a.order_id is None or a.lab_updated_at:
+        messages.info(request, "ההזמנה כבר סומנה כמעודכנת והוסרה מהמערכת.")
+        return redirect(nxt)
+    name = a.item_name
+    Allocation.objects.filter(order=a.order, status=Allocation.Status.APPROVED).update(
+        lab_updated_at=timezone.now(), lab_updated_by=request.user.get_username())
+    resolver.retire_orders([a.order_id])
+    n = resolver.reconcile()
+    tail = " ההחלטה כבר כלולה ביתרת SAP האחרונה." if n else " הסכום נשאר שמור עד שדוח SAP יכסה את ההזמנה."
+    messages.success(request, f"סומן כעודכן במערכות המעבדה והוסר מהמערכת: {name}. "
+                              f"הסכום נשאר מנוכה מהמענק.{tail}")
+    return redirect(nxt)
 
 
 # --------------------------------------------------------------------------- generic API
@@ -425,6 +447,8 @@ def api_delete(request, key, pk):
         obj.is_current = False          # LabSuit rows are hidden, not deleted (they may return in the next export)
         obj.save(update_fields=["is_current"])
     else:
+        if key == "orders":             # a decision that is not marked "updated" goes with its order (the money is released)
+            Allocation.objects.filter(order=obj, lab_updated_at__isnull=True).delete()
         obj.delete()
     return redirect(request.POST.get("next") or "/")
 
@@ -463,7 +487,10 @@ def api_import(request, key):
 
 
 def _build_preview(p):
+    attachments = (p.preview or {}).get("attachments")        # what the robot scraped; not part of the dry run
     p.preview = dry_run(p.source, bytes(p.data), p.file_name, p.as_of, p.mode, user=p.uploaded_by, **p.kwargs())
+    if attachments:
+        p.preview["attachments"] = attachments
     p.save(update_fields=["preview", "mode"])
 
 
@@ -536,6 +563,9 @@ def import_confirm(request, pk):
             parts.append(f"{batch.stats['reconciled']} החלטות נכללו ביתרת SAP")
         if batch.stats.get("lab_marked"):
             parts.append(f"{batch.stats['lab_marked']} החלטות זוהו כרשומות ב-LabSuit")
+        saved_files = autofetch.attach_pending_files(p)
+        if saved_files:
+            parts.append(f"{saved_files} קבצי PDF נשמרו")
         messages.success(request, f"עודכן מהקובץ {p.file_name} ({'Replace' if p.mode == 'replace' else 'Merge'}) — "
                                   + ", ".join(parts))
         p.delete()
@@ -576,7 +606,7 @@ def api_autofetch(request, key):
     if not saved_user or not saved_pw:
         return JsonResponse({"ok": False, "need_credentials": True,
                              "error": "חסרים שם משתמש וסיסמה ל-LabSuit."}, status=400)
-    recent = timezone.now() - timedelta(minutes=5)
+    recent = timezone.now() - timedelta(minutes=30)      # the PDFs can make a run last many minutes
     job = AutoFetchJob.objects.filter(table_key=key, created_at__gte=recent,
                                       status__in=[AutoFetchJob.Status.QUEUED, AutoFetchJob.Status.RUNNING]).first()
     if job is None:
@@ -590,7 +620,7 @@ def api_autofetch(request, key):
 def api_autofetch_status(request, pk):
     job = get_object_or_404(AutoFetchJob, pk=pk)
     if job.status in (AutoFetchJob.Status.QUEUED, AutoFetchJob.Status.RUNNING) and \
-            job.created_at < timezone.now() - timedelta(minutes=4):
+            job.created_at < timezone.now() - timedelta(minutes=30):
         # the worker thread died (e.g. a server restart) — don't leave the user waiting forever
         job.status, job.error, job.finished_at = AutoFetchJob.Status.FAILED, "העדכון האוטומטי לא הסתיים בזמן.", timezone.now()
         job.save(update_fields=["status", "error", "finished_at"])

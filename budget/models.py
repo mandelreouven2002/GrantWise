@@ -101,6 +101,16 @@ class PendingImport(models.Model):
         return {"min_year": self.min_year} if self.source == ImportBatch.Source.LABSUIT_ORDERS and self.min_year else {}
 
 
+class PendingFile(models.Model):
+    """A PDF the robot scraped during an automatic update. It waits with its PendingImport and is attached
+    to the order only when the user confirms the preview (nothing is saved before that)."""
+    pending = models.ForeignKey(PendingImport, on_delete=models.CASCADE, related_name="files")
+    natural_key = models.CharField(max_length=64)
+    quote_id = models.CharField(max_length=60, blank=True)
+    file_name = models.CharField(max_length=255)
+    data = models.BinaryField()
+
+
 def _fernet():
     """Symmetric key derived from SECRET_KEY: stored passwords are unreadable without it."""
     import base64
@@ -399,8 +409,6 @@ class FundingAlias(models.Model):
 class OrderRequest(models.Model):
     class AmountSource(models.TextChoices):
         LABSUIT = "labsuit", "LabSuit"
-        HISTORY = "history", "מחיר היסטורי (אותו מק״ט)"
-        INVENTORY = "inventory", "מחיר מהמלאי"
         MANUAL = "manual", "ידני"
         NONE = "none", "אין"
 
@@ -435,7 +443,7 @@ class OrderRequest(models.Model):
     # lab-owned fields (preserved across imports)
     project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.SET_NULL, verbose_name="פרויקט")
     category = models.ForeignKey(BudgetCategory, null=True, blank=True, on_delete=models.SET_NULL, verbose_name="סעיף")
-    amount_est = models.DecimalField("סכום משוער", **MONEY, null=True, blank=True)
+    amount_est = models.DecimalField("סכום", **MONEY, null=True, blank=True)
     amount_currency = models.CharField("מטבע", max_length=3, default="ILS", validators=[validate_currency])
     amount_source = models.CharField(max_length=10, choices=AmountSource.choices, default=AmountSource.NONE)
     lab_notes = models.TextField("הערות מעבדה", blank=True)
@@ -454,6 +462,21 @@ class OrderRequest(models.Model):
 
     def __str__(self):
         return f"{self.item_name} ×{self.quantity:g}"
+
+
+class OrderFile(models.Model):
+    """The PDF attached to a request in LabSuit (the supplier's quote). Kept apart from OrderRequest so
+    listing orders never loads the file bytes."""
+    order = models.OneToOneField(OrderRequest, on_delete=models.CASCADE, related_name="file")
+    quote_id = models.CharField(max_length=60, blank=True)
+    file_name = models.CharField("קובץ", max_length=255)
+    data = models.BinaryField()
+    size = models.PositiveIntegerField(default=0)
+    fetched_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        verbose_name = "קובץ הצעת מחיר"
+        verbose_name_plural = "קבצי הצעות מחיר"
 
 
 class InventoryItem(models.Model):
@@ -544,7 +567,14 @@ class Allocation(models.Model):
         REJECTED = "rejected", "נדחה"
         SUPERSEDED = "superseded", "כלול ביתרת SAP"
 
-    order = models.ForeignKey(OrderRequest, on_delete=models.CASCADE, related_name="allocations")
+    # SET_NULL: once the lab has updated LabSuit/SAP the order row itself is deleted, but the funding stays
+    # reserved on the grant until SAP covers it — so what the decision needs about its order is kept here.
+    order = models.ForeignKey(OrderRequest, null=True, blank=True, on_delete=models.SET_NULL,
+                              related_name="allocations")
+    order_label = models.CharField(max_length=300, blank=True, help_text="שם הפריט, אחרי שההזמנה נמחקה")
+    order_key = models.CharField(max_length=64, blank=True, db_index=True,
+                                 help_text="המפתח הטבעי של ההזמנה שנמחקה")
+    order_po_date = models.DateField(null=True, blank=True, help_text="תאריך הזמנת הרכש, אם היה ידוע")
     run = models.ForeignKey(ResolveRun, null=True, blank=True, on_delete=models.SET_NULL, related_name="allocations")
     grant = models.ForeignKey(Grant, null=True, blank=True, on_delete=models.PROTECT,
                               help_text="ריק = לא נמצא מימון לחלק הזה")
@@ -565,6 +595,10 @@ class Allocation(models.Model):
     # the amount stays reserved until a SAP report dated on/after the order (or this mark) covers it.
     lab_updated_at = models.DateTimeField("עודכן במערכות המעבדה", null=True, blank=True)
     lab_updated_by = models.CharField(max_length=150, blank=True)
+
+    @property
+    def item_name(self):
+        return self.order.item_name if self.order_id else self.order_label
 
     class Meta:
         ordering = ["-id"]
