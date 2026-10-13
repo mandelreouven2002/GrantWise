@@ -14,7 +14,4 @@
 </form>
 {% if in_bin %}<p class="card" style="margin:0 0 10px"><b>{{ in_bin }}</b> הזמנות אושרו והועברו לסל המחזור בדף ההמלצות, ולכן אינן מופיעות כאן. <a href="{% url 'resolve' %}#bin">לסל המחזור ←</a></p>{% endif %}
 {% include "budget/_table.html" %}
-
-<h2 id="labels">תוויות מימון מ-LabSuit {% if review %}<span class="tag warn">{{ review }} לבדיקה</span>{% endif %} <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">מה פירוש כל ערך בעמודת GRANT_ID: מענק ספציפי, הזמנה עומדת / שמור-מכור (כבר מחויב ב-SAP ולא נכנס להמלצות), או "פתוח" — ההמלצות יחליטו.</span></span></h2>
-{% include "budget/_table.html" with t=aliases %}
 {% endblock %}
