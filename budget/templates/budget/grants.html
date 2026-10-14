@@ -1,7 +1,10 @@
 {% extends "budget/base.html" %}{% load money %}
 {% block title %}מענקים · LabFund{% endblock %}
 {% block content %}
-<div class="titlebar"><h1>מענקים <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">היתרות מ-SAP כבר כוללות התחייבויות. "ממתין" = מה ש-SAP עוד לא רואה: החלטות שאושרו בהמלצות, והזמנות שיצאו אחרי תאריך קובץ ה-SAP (לפי ה-GRANT_ID שלהן). כל הקטגוריות כמו בקובץ ה-SAP, והיתרה של כל אחת היא מה שנשאר בה.</span></span></h1>{% include "budget/_lastimport.html" %}<span class="spacer"></span>{% include "budget/_actions.html" %}</div>
+<section class="orders-hero">
+  <h1>מענקים</h1>
+</section>
+<div class="titlebar"><span class="info" tabindex="0" aria-label="מידע">i<span class="tip">היתרות מ-SAP כבר כוללות התחייבויות. "ממתין" = מה ש-SAP עוד לא רואה: החלטות שאושרו בהמלצות, והזמנות שיצאו אחרי תאריך קובץ ה-SAP (לפי ה-GRANT_ID שלהן). כל הקטגוריות כמו בקובץ ה-SAP, והיתרה של כל אחת היא מה שנשאר בה.</span></span>{% include "budget/_lastimport.html" %}<span class="spacer"></span>{% include "budget/_actions.html" %}</div>
 <div class="kpis">
   <div class="kpi"><b>{{ total_ils|money }} ₪</b><span>זמין במענקים בתוקף (שווי משוער)</span></div>
   <div class="kpi"><b><a href="{% url 'resolve' %}">{{ open_orders }}</a></b><span>אושרו ב-LabSuit וממתינות להזמנה</span></div>
