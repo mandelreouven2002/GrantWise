@@ -4,7 +4,6 @@ from django.urls import path
 from budget import views
 
 urlpatterns = [
-    path("", views.dashboard_view, name="dashboard"),
     path("grants/", views.grants_view, name="grants"),
     path("orders/", views.orders_view, name="orders"),
     path("orders/<int:pk>/file/", views.order_file, name="order_file"),
