@@ -19,7 +19,7 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 from django.views.decorators.http import require_POST
 
-from . import autofetch
+from . import ai_assist, autofetch
 from .amounts import is_material, order_amount
 from . import resolve as resolver
 from .fx import MissingRate, rate_to_ils
@@ -226,9 +226,10 @@ def _resolve_params(request):
 def resolve_view(request):
     """Computes the recommendation on every visit — in memory only; nothing is saved until approval."""
     params = _resolve_params(request)
+    constraints = request.session.get("ai_constraints", [])
     result, error = None, None
     try:
-        result = resolver.compute(**params)
+        result = resolver.compute(constraints=constraints, **params)
     except (ValueError, MissingRate) as e:
         error = str(e)
 
@@ -246,7 +247,7 @@ def resolve_view(request):
                 opts.append(dict(num=g.number, label=(g.sponsor or g.description)[:40], currency=g.currency,
                                  end=g.end_date, days=st.days_left, avail_cat=op.avail_cat, total=st.total,
                                  pooled=st.pooled, rank=op.rank, urgent=op.urgency >= 0.5,
-                                 reserve=g.is_reserve, priority=g.pi_priority))
+                                 reserve=g.is_reserve, priority=g.pi_priority, blocked=op.blocked))
             first = next((l for l in plan.lines if l.grant), None)
             rem = rem_where = None
             if first:
@@ -286,7 +287,7 @@ def resolve_view(request):
                 cur=g.currency, rate=float(st.rate), total=float(st.total), pooled=st.pooled,
                 cats={k: float(v) for k, v in st.cats.items()}, extra={k: float(v) for k, v in st.extra.items()},
                 label=(g.sponsor or g.description)[:40], end=g.end_date.strftime("%d/%m/%Y") if g.end_date else "",
-                days=st.days_left, vatReq=bool(g.vat_required))
+                days=st.days_left, vatReq=bool(g.vat_required), held=float(result.held.get(num, 0)))
         rank = {"unfunded": 0, "ok": 1, "noamount": 2, "skipped": 3, "standing": 3}
         rows.sort(key=lambda r: (rank[r["state"]], -(r["order"].date_requested or date.min).toordinal()))
     payload["catNames"] = dict(BudgetCategory.objects.values_list("code", "name_he"))
@@ -294,8 +295,83 @@ def resolve_view(request):
     count = lambda *states: sum(1 for r in rows if r["state"] in states)  # noqa: E731
     return render(request, "budget/resolve.html", dict(
         result=result, error=error, rows=rows, bin=_recycle_bin(), params=params, payload=payload,
+        ai_ready=ai_assist.configured(), ai_chips=_ai_chips(constraints),
+        ai_summary=request.session.get("ai_summary", ""), ai_max=ai_assist.MAX_INSTRUCTION_CHARS,
         n_ready=count("ok", "unfunded"), n_noamount=count("noamount"),
         n_unfunded=count("unfunded"), n_skipped=count("skipped"), n_standing=count("standing")))
+
+
+def _ai_chips(constraints):
+    """The active instructions as (index, plain-Hebrew text) — shown under the AI input, each removable."""
+    if not constraints:
+        return []
+    grant_names = {g.number: (g.sponsor or g.description or "")[:30] for g in Grant.objects.all()}
+    ids = [c["order"] for c in constraints if c.get("order") is not None]
+    order_names = {o.pk: o.item_name[:30] for o in OrderRequest.objects.filter(pk__in=ids)}
+    return [(i, ai_assist.describe(c, grant_names, order_names)) for i, c in enumerate(constraints)]
+
+
+@login_required
+@require_POST
+def resolve_ai(request):
+    """AI assist: a typed instruction becomes constraints for the optimiser (kept in the session only).
+    The model returns a closed set of constraints — it never picks amounts or writes anything."""
+    session = request.session
+    back = reverse("resolve") + ("?" + request.GET.urlencode() if request.GET else "")
+    if request.POST.get("clear"):
+        session.pop("ai_constraints", None)
+        session.pop("ai_summary", None)
+        messages.info(request, "ההוראות בוטלו — ההמלצה חזרה לחישוב הרגיל.")
+        return redirect(back)
+    current = list(session.get("ai_constraints", []))
+    if request.POST.get("remove") not in (None, ""):
+        try:
+            current.pop(int(request.POST["remove"]))
+        except (ValueError, IndexError):
+            pass
+        session["ai_constraints"] = current
+        if not current:
+            session.pop("ai_summary", None)
+        return redirect(back)
+
+    text = (request.POST.get("instruction") or "").strip()[:ai_assist.MAX_INSTRUCTION_CHARS]
+    if not text:
+        messages.error(request, "לא נכתבה הוראה.")
+        return redirect(back)
+    if not ai_assist.configured():
+        messages.error(request, "ה-AI לא מוגדר: חסרים AWS_BEARER_TOKEN_BEDROCK ו-AWS_REGION בסביבה.")
+        return redirect(back)
+    if not ai_assist.check_rate(session):
+        messages.error(request, f"הגעת למגבלה של {ai_assist.CALLS_PER_HOUR} בקשות AI בשעה. אפשר לנסות שוב מאוחר יותר.")
+        return redirect(back)
+    try:
+        result = resolver.compute(constraints=current, **_resolve_params(request))
+        ctx = ai_assist.build_context(result, current)
+        reply = ai_assist.ask(text, ctx.text)
+    except (ValueError, MissingRate) as e:
+        messages.error(request, str(e))
+        return redirect(back)
+    except ai_assist.AiError as e:
+        messages.error(request, str(e))
+        return redirect(back)
+
+    new, dropped = ai_assist.validate(reply, ctx.grants, ctx.orders)
+    if new:
+        session["ai_constraints"] = ai_assist.merge(current, new)
+        summary = str(reply.get("summary_he") or "").strip()[:300]
+        session["ai_summary"] = summary
+        messages.success(request, "ההוראה הופעלה — ההמלצה חושבה מחדש (לא נשמר דבר במסד הנתונים)."
+                                  + (f" {summary}" if summary else ""))
+    elif not (reply.get("clarify") or reply.get("unsupported")):
+        messages.warning(request, "לא הצלחתי להפוך את ההוראה לשינוי בהמלצה. אפשר לנסח אותה מחדש, "
+                                  "עם שם המענק או הבקשה.")
+    if reply.get("clarify"):
+        messages.info(request, str(reply["clarify"])[:300])
+    if reply.get("unsupported"):
+        messages.warning(request, str(reply["unsupported"])[:300])
+    if dropped and new:
+        messages.warning(request, f"חלק מההוראה לא הופעל ({len(dropped)}): " + "; ".join(sorted(set(dropped))))
+    return redirect(back)
 
 
 def _recycle_bin():

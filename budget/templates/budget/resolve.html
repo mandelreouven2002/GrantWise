@@ -36,11 +36,39 @@
   כל בקשה ממומנת <b>ממענק אחד</b>, כמו שרושמים GRANT_ID אחד ב-LabSuit. אם אין מענק אחד שמכסה את כל הסכום, הבקשה מסומנת "אין מקור מספיק". בכל שורה, "פירוט" מציג את כל המענקים הכשירים לפי סדר העדיפות ולמה האחרים נפסלו.</p>
 </details>
 
+<style>
+  .rem .neg{color:var(--bad)} #plans details summary{cursor:pointer}
+  .ai-panel{margin:8px 0 12px}
+  .ai-panel .ai-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .ai-panel input[name=instruction]{flex:1 1 360px;min-width:220px}
+  .ai-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center}
+  .ai-chip{display:inline-flex;gap:6px;align-items:center;padding:3px 4px 3px 10px;border:1px solid var(--line, #d0d7de);border-radius:14px;background:var(--panel, #f6f8fa);font-size:13px}
+  .ai-chip button{border:0;background:none;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;padding:2px 6px}
+  .tag.blocked{opacity:.75}
+</style>
+<h2>בקשות <span class="muted" style="font-weight:400">— מסמנים מה לאשר. ההסבר, הסיבה וההשוואה בהרחבה (▸) בכל שורה</span></h2>
+
+<form method="post" action="{% url 'resolve_ai' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}" id="ai-form" class="card ai-panel" autocomplete="off">{% csrf_token %}
+  <label for="ai-text"><b>✨ הוראה בטקסט חופשי</b> <span class="muted">— ה-AI משנה רק את ההצעה שבדף, לא את הנתונים. אין שינוי עד "אישור".</span></label>
+  <div class="ai-row" style="margin-top:6px">
+    <input class="f" id="ai-text" name="instruction" maxlength="{{ ai_max }}" {% if not ai_ready %}disabled{% endif %}
+           placeholder="למשל: אני לא רוצה להשתמש במענק של הרשות הלאומית, אני רוצה לשמור אותו להמשך">
+    <button class="btn" id="ai-btn" {% if not ai_ready %}disabled{% endif %}>העזר ב-AI</button>
+  </div>
+  {% if not ai_ready %}<div class="reason" style="margin-top:6px">ה-AI לא מוגדר בסביבה הזו: חסרים המשתנים AWS_BEARER_TOKEN_BEDROCK ו-AWS_REGION.</div>{% endif %}
+  {% if ai_chips %}
+  <div class="ai-chips">
+    <span class="muted">פועל עכשיו:</span>
+    {% for i, text in ai_chips %}<span class="ai-chip">{{ text }}<button name="remove" value="{{ i }}" title="ביטול ההוראה" aria-label="ביטול ההוראה" formnovalidate>✕</button></span>{% endfor %}
+    <button name="clear" value="1" class="btn small ghost" formnovalidate>אפס הכול</button>
+  </div>
+  {% if ai_summary %}<div class="reason" style="margin-top:6px">מה הבנתי: {{ ai_summary }}</div>{% endif %}
+  {% endif %}
+  {% if result.notes %}<ul class="msgs" style="margin-top:8px">{% for n in result.notes %}<li class="error">{{ n }}</li>{% endfor %}</ul>{% endif %}
+</form>
+
 <form method="post" action="{% url 'resolve_approve' %}" id="approve-form" autocomplete="off">{% csrf_token %}
 <input type="hidden" name="next" value="{{ request.get_full_path }}">
-
-<style>.rem .neg{color:var(--bad)} #plans details summary{cursor:pointer}</style>
-<h2>בקשות <span class="muted" style="font-weight:400">— מסמנים מה לאשר. ההסבר, הסיבה וההשוואה בהרחבה (▸) בכל שורה</span></h2>
 <div class="tbl-wrap" style="max-height:none">
 <table id="plans">
   <thead><tr>
@@ -74,7 +102,7 @@
         <span class="tag bad">אין מקור מספיק</span>
         {% else %}
         <div class="lines" data-order="{{ r.order.id }}"><div class="line">
-          <select class="f lg" name="g_{{ r.order.id }}">{% for op in r.options %}<option value="{{ op.num }}" {% if op.num == r.lines.0.grant.number %}selected{% endif %}>{{ op.num }}{% if op.label %} · {{ op.label }}{% endif %} · {{ op.currency }}{% if op.rank == 1 %} ★{% endif %}</option>{% endfor %}</select>
+          <select class="f lg" name="g_{{ r.order.id }}">{% for op in r.options %}<option value="{{ op.num }}" {% if op.num == r.lines.0.grant.number %}selected{% endif %}>{{ op.num }}{% if op.label %} · {{ op.label }}{% endif %} · {{ op.currency }}{% if op.blocked %} · ({{ op.blocked }}){% elif op.rank == 1 %} ★{% endif %}</option>{% endfor %}</select>
         {% endif %}
           <details class="why" style="margin-top:6px"><summary class="muted">פירוט והסבר · {{ r.options|length }} מענקים כשירים{% if r.why_not %}, {{ r.why_not|length }} נפסלו{% endif %}</summary>
             <div class="reason lreason" style="margin-top:6px">{{ r.lines.0.reason_main|linebreaksbr }}</div>
@@ -85,7 +113,7 @@
                 <td class="ro">{{ op.end|date:"d/m/Y" }}{% if op.days != None %} ({{ op.days }} ימים){% endif %}</td>
                 <td class="ro num">{% if op.pooled %}<span class="muted">מאגר</span>{% else %}{{ op.avail_cat|money:2 }} {{ op.currency }}{% endif %}</td>
                 <td class="ro num">{{ op.total|money:2 }} {{ op.currency }}</td>
-                <td class="ro reason">{% if op.urgent %}בסכנת אי-ניצול · {% endif %}{% if op.reserve %}רזרבה · {% endif %}{% if op.priority %}עדיפות {{ op.priority }}{% endif %}</td></tr>{% endfor %}
+                <td class="ro reason">{% if op.blocked %}{{ op.blocked }} · {% endif %}{% if op.urgent %}בסכנת אי-ניצול · {% endif %}{% if op.reserve %}רזרבה · {% endif %}{% if op.priority %}עדיפות {{ op.priority }}{% endif %}</td></tr>{% endfor %}
             </table>
             {% if r.why_not %}<div class="reason" style="margin-top:6px"><b>לא כשירים:</b> {% for num, why in r.why_not %}{{ num }} — {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>{% endif %}
           </details>
@@ -183,6 +211,7 @@
       const g = D.grants[n], take = useT[n], after = g.total - take; totalIls += take * g.rate;
       const notes = [];
       if(after < -TOL){ notes.push(`<span class="tag bad">חריגה מהיתרה הכוללת</span>`); problems++; }
+      if(g.held && after < g.held - TOL){ notes.push(`<span class="tag warn">נוגע בסכום ששמרת (${fmt(g.held, 0)} ${g.cur})</span>`); }
       if(!g.pooled){
         Object.keys(useC).filter(k => k.startsWith(n + '|')).forEach(k => {
           const cat = k.split('|')[1], cap = (g.cats[cat] || 0) + (g.extra[cat] || 0), left = cap - useC[k];
@@ -217,6 +246,10 @@
   document.addEventListener('change', e => {
     if(e.target.matches('.lg')){ markEdited(e.target); const r = e.target.closest('.line').querySelector('.lreason'); if(r) r.textContent = 'בחרת מענק אחר מההמלצה.'; recalc(); }
     if(e.target.matches('.pick')) recalc();
+  });
+  document.getElementById('ai-form')?.addEventListener('submit', e => {
+    const b = document.getElementById('ai-btn');
+    if(e.submitter === b && b){ b.disabled = true; b.textContent = 'חושב…'; setTimeout(() => { document.getElementById('ai-text').readOnly = true; }, 0); }
   });
   document.getElementById('refresh-btn')?.addEventListener('click', () => { location.href = location.pathname + location.search; });
   recalc();
