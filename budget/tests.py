@@ -139,13 +139,32 @@ class ResolveTests(TestCase):
         self.assertEqual(self.grants_of(r, o), {"L"})
         self.assertIn("A", self.plan_of(r, o).why_not)
 
-    def test_category_rule_and_project_link(self):
+    def test_category_rule(self):
         GrantRule.objects.create(grant=self.later, category_id="EQUIPMENT", allowed=False)
-        p = Project.objects.create(name="P1")
-        ProjectGrant.objects.create(project=p, grant=self.reserve)
-        o = self.order("2000", category="EQUIPMENT", project=p)
+        o = self.order("2000", category="EQUIPMENT")
         r = resolve.compute(today=TODAY)
-        self.assertEqual(self.grants_of(r, o), {"R"})   # pooled grant, linked to project
+        self.assertEqual(self.grants_of(r, o), {"R"})   # the only grant that can take equipment (pooled)
+
+    def test_project_has_no_effect_on_the_recommendation(self):
+        """The project (a free text now; the old project links) is display only: it never restricts or steers."""
+        plain = self.order("1000")
+        p = Project.objects.create(name="P1")
+        ProjectGrant.objects.create(project=p, grant=self.later, weight=3)     # would have steered to L
+        linked = self.order("1000", project=p, project_text="whatever I like")
+        r = resolve.compute(today=TODAY)
+        self.assertEqual(self.grants_of(r, plain), self.grants_of(r, linked))
+
+    # ---- salary and services carry no VAT: the price stays the price, even for a grant that pays none
+
+    def test_salary_and_services_are_not_divided_by_vat(self):
+        self.later.vat_required = False
+        self.later.save()
+        for cat, divisor in (("MATERIAL", Decimal("1.18")), ("SALARY", Decimal("1")), ("SERVICE", Decimal("1"))):
+            self.assertEqual(resolve.vat_divisor(self.later, cat), divisor, cat)
+        o = self.order("2000", category="SALARY")
+        GrantLine.objects.create(batch=self.batch, grant=self.later, category_id="SALARY", balance=Decimal("50000"))
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
+        self.assertEqual(Allocation.objects.get(order=o).amount_grant_ccy, Decimal("2000.00"))   # not 1694.92
 
     def test_unfunded_when_nothing_fits(self):
         o = self.order("10000000")
@@ -249,9 +268,8 @@ class ResolveTests(TestCase):
         self.assertEqual(page.context["bin"], [])
         self.assertNotIn(o.item_name, [r["order"].item_name for r in page.context["rows"]])
         self.assertNotIn(o.item_name, [r["obj"].item_name for r in self.client.get("/orders/?year=all").context["t"]["rows"]])
-        # the money stays deducted from the grant, and the decision still shows in the grant's list
+        # the money stays deducted from the grant
         self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("48000"))
-        self.assertContains(self.client.get("/grants/"), o.item_name)
         # pressing it again (old tab) changes nothing
         self.client.post(f"/resolve/lab-updated/{a.pk}/")
         self.assertEqual(Allocation.objects.count(), 1)
@@ -302,6 +320,39 @@ class ResolveTests(TestCase):
         for qs in (resolve.locked_grants(["A", "L"]), resolve.locked_orders([1, 2])):
             self.assertTrue(qs.query.select_for_update)
             self.assertEqual(qs.query.select_for_update_of, ("self",))
+
+    # ---- VAT: a grant that does not pay VAT is charged the price before VAT
+
+    def test_grant_without_vat_is_charged_price_divided_by_118(self):
+        self.later.vat_required = False
+        self.later.save()
+        o = self.order("2000")
+        resolve.approve_plans({o.pk: "L"}, today=TODAY)
+        a = Allocation.objects.get(order=o)
+        self.assertEqual(a.amount_ils, Decimal("2000.00"))                     # the order's price is unchanged
+        self.assertEqual(a.amount_grant_ccy, Decimal("1694.92"))               # 2000 / 1.18 comes off the grant
+        self.assertEqual(resolve.grant_states(TODAY, TODAY)["L"].total, Decimal("50000") - Decimal("1694.92"))
+        self.assertEqual((a.amount_orig * 1 / Decimal("1.18")).quantize(Decimal("0.01")), a.amount_grant_ccy)
+
+    def test_vat_changes_what_fits(self):
+        GrantRule.objects.create(grant=self.soon, category_id="MATERIAL", allowed=False)
+        GrantRule.objects.create(grant=self.reserve, category_id="MATERIAL", allowed=False)
+        o = self.order("55000")                    # L holds 50,000: only fits once the VAT is not charged
+        self.assertEqual(self.plan_of(resolve.compute(today=TODAY), o).state, "unfunded")
+        self.later.vat_required = False
+        self.later.save()
+        r = resolve.compute(today=TODAY)
+        self.assertEqual(self.grants_of(r, o), {"L"})
+        self.assertAlmostEqual(float(self.plan_of(r, o).lines[0].amount_grant), 55000 / 1.18, delta=0.01)
+
+    def test_explanation_mentions_that_the_grant_pays_no_vat(self):
+        self.later.vat_required = False
+        self.later.save()
+        GrantRule.objects.create(grant=self.soon, category_id="MATERIAL", allowed=False)
+        GrantRule.objects.create(grant=self.reserve, category_id="MATERIAL", allowed=False)
+        o = self.order("1000")
+        lines = self.reason_of(resolve.compute(today=TODAY), o)
+        self.assertTrue(any("לא משלם מע״מ" in l and "1.18" in l for l in lines))
 
     def test_double_approval_refused(self):
         o = self.order("100")
@@ -419,16 +470,23 @@ class DashboardTests(TestCase):
         self.assertTrue(on_orders_page <= set(states))
 
 
-    def test_project_select_and_dash_for_empty(self):
-        p = Project.objects.create(name="Melanoma")
-        self.client.post("/api/orders/new/", {"item_name": "y", "amount_est": "10", "amount_currency": "ILS"})
+    def test_project_column_is_free_text_defaulting_to_the_grant_id_with_grant_suggestions(self):
+        self.client.post("/api/orders/new/", {"item_name": "y", "amount_est": "10", "amount_currency": "ILS",
+                                              "grant_label": "2032917"})
         o = OrderRequest.objects.get(item_name="y")
-        self.assertEqual(self.post_json(f"/api/orders/{o.pk}/", {"field": "project", "value": str(p.pk)}).status_code, 200)
-        self.assertEqual(OrderRequest.objects.get(pk=o.pk).project, p)
-        self.post_json(f"/api/orders/{o.pk}/", {"field": "project", "value": ""})
-        self.assertIsNone(OrderRequest.objects.get(pk=o.pk).project)
         page = self.client.get("/orders/")
-        self.assertContains(page, '<option value="" selected>-</option>', html=False)
+        cell = next(c for c in page.context["t"]["rows"][0]["cells"] if c["col"].field == "project_text")
+        self.assertEqual(cell["value"], "2032917")                      # shows the GRANT_ID until the lab types
+        self.assertContains(page, '<datalist id="grant-numbers">')      # suggestions: every grant of the table
+        self.assertContains(page, '<option value="A">')
+        # any text may be typed; it is only stored for display and no longer a link to anything
+        r = self.post_json(f"/api/orders/{o.pk}/", {"field": "project_text", "value": "my own words"})
+        self.assertEqual(r.status_code, 200)
+        o.refresh_from_db()
+        self.assertEqual((o.project_text, o.grant_label), ("my own words", "2032917"))
+        # the LabSuit label is not touched, so an import keeps the typed text
+        self.assertNotIn("project_text", OrderRequest.LABSUIT_FIELDS)
+        self.assertEqual(self.client.get("/settings/?tab=projects").status_code, 404)   # the projects table is gone
 
     def test_unknown_currency_rejected_until_tracked(self):
         o = OrderRequest.objects.create(natural_key="k", item_name="z")
@@ -654,7 +712,7 @@ class ImportPreviewTests(TestCase):
 
 @override_settings(FX_AUTO_REFRESH=False)
 class GrantCategoryViewTests(TestCase):
-    def test_grants_page_shows_per_category_after_decisions_and_decision_list(self):
+    def test_grants_page_shows_per_category_after_decisions_and_no_row_expansion(self):
         from django.contrib.auth.models import User
         from budget import resolve
         User.objects.create_user("u", password="p")
@@ -667,8 +725,9 @@ class GrantCategoryViewTests(TestCase):
         resolve.approve_plans({o.pk: "A"})
         page = self.client.get("/grants/")
         self.assertContains(page, "אחרי החלטות: 2,500")
-        self.assertContains(page, "Antibody X")
-        self.assertContains(page, "ממתין ל-SAP")
+        self.assertNotContains(page, 'class="toggle"')                  # one line per grant, nothing to expand
+        self.assertNotContains(page, "כללי מענק")
+        self.assertNotContains(page, "פרויקטים מורשים")
 
 
 @override_settings(FX_AUTO_REFRESH=False)
@@ -1095,3 +1154,68 @@ class HomePageTests(TestCase):
         self.client.logout()
         r = self.client.post("/login/", {"username": "u", "password": "p"}, follow=True)
         self.assertContains(r, 'href="/orders/"')
+
+
+@override_settings(FX_AUTO_REFRESH=False)
+class GrantsTableAndRecommendationPageTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user("u", password="p")
+        self.client.login(username="u", password="p")
+        FxRate.objects.create(date=TODAY, currency="EUR", rate_to_ils=Decimal("3.4422"))
+        self.batch = ImportBatch.objects.create(source="sap_grants", file_name="t", as_of=TODAY)
+        self.g = Grant.objects.create(number="A", currency="EUR", end_date=date(2027, 6, 1), sponsor="Horizon",
+                                      balance_total=Decimal("1000"), last_batch=self.batch)
+        for cat, v in {"MATERIAL": "700", "TRAVEL_EXT": "300", "OVERHEAD": "150"}.items():
+            GrantLine.objects.create(batch=self.batch, grant=self.g, category_id=cat, balance=Decimal(v))
+
+    def test_grants_table_shows_every_category_the_file_has_and_only_those(self):
+        page = self.client.get("/grants/")
+        fields = [c.field for c in page.context["t"]["cols"]]
+        for code in ("MATERIAL", "TRAVEL_EXT", "OVERHEAD"):
+            self.assertIn(f"line:{code}", fields)
+        for code in ("BOOKS", "SELF", "SALARY"):                      # nobody on the page has a line for these
+            self.assertNotIn(f"line:{code}", fields)
+        self.assertContains(page, "נסיעות לחו״ל")
+        self.assertContains(page, "תקורה")
+
+    def test_vat_flag_defaults_to_required_and_is_editable_in_the_table(self):
+        import json
+        self.assertTrue(Grant.objects.get(pk="A").vat_required)
+        self.assertIn("vat_required", [c.field for c in self.client.get("/grants/").context["t"]["cols"]])
+        r = self.client.post("/api/grants/A/", json.dumps({"field": "vat_required", "value": False}),
+                             content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(Grant.objects.get(pk="A").vat_required)
+
+    def test_import_does_not_reset_the_vat_flag(self):
+        Grant.objects.filter(pk="A").update(vat_required=False)
+        from budget.importers import run_import
+        import io
+        txt = "GRANT\tgrant_currency\tsponsor_name\tgrant_budjet\tGrant Expense\tGrant Balance\tfund_end_dt\tMATERIAL_BAL\n" \
+              "A\tEUR\tX\t2000\t1000\t1000\t01/06/2027\t700\n"
+        run_import("sap_grants", io.BytesIO(txt.encode("utf-16")), "t.xls", TODAY, "merge")
+        self.assertFalse(Grant.objects.get(pk="A").vat_required)
+
+    def test_recommendation_page_layout(self):
+        OrderRequest.objects.create(natural_key="k", item_name="Thing", status="approved", amount_est=Decimal("100"),
+                                    amount_currency="EUR", category_id="MATERIAL", date_requested=TODAY)
+        page = self.client.get("/resolve/")
+        html = page.content.decode()
+        self.assertLess(html.index('id="plans"'), html.index('id="summary"'))      # the summary is below the requests
+        self.assertLess(html.index('id="summary"'), html.index('id="approve-btn"'))
+        plans = html[html.index('id="plans"'):html.index('id="summary"')]
+        self.assertNotIn('class="cell', plans)                                     # nothing to edit in the table
+        self.assertNotIn("data-f=", plans)
+        row = page.context["rows"][0]
+        self.assertEqual(row["rem_cur"], "EUR")                                   # "how much will remain" is on the row
+        self.assertEqual(row["pay"], row["lines"][0].amount_grant)                # …and how much is paid from the grant
+        self.assertIn("משלמים", html)
+        self.assertNotIn("lconv", html)                                           # no side text for it any more
+        self.assertIn("A · Horizon · EUR", html[html.index("<select"):html.index("</select>")])   # name sits in the option
+        self.assertEqual(row["rem"], Decimal("700") - row["lines"][0].amount_grant)
+        self.assertIn("יישאר", plans)
+        # the reason lives inside the expandable part only
+        why = plans[plans.index('<details class="why"'):]
+        self.assertIn('class="reason lreason"', why)
+        self.assertNotIn('class="reason lreason"', plans[:plans.index('<details class="why"')])

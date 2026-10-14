@@ -12,7 +12,7 @@ Pipeline (compute)
                   − orders placed after the SAP snapshot (by their LabSuit GRANT_ID).
 2. candidates   – orders approved in LabSuit and not ordered yet, requested within `lookback_days`,
                   not on a standing order, not already approved here, with an amount.
-3. eligibility  – hard rules (dates, cutoff, project links, category allowed, balance).
+3. eligibility  – hard rules (dates, cutoff, category allowed, balance).
 4. Optimisation (PuLP 3.x + bundled CBC) over all candidates together.
    One grant per request (the lab funds a request by writing a single GRANT_ID):
        min  Σ cost[o,g]·A_o·y[o,g] + Σ BIG·A_o·z_o        y, z ∈ {0,1}
@@ -248,7 +248,8 @@ def unseen_orders(sap_as_of, today=None):
             r_g, _ = rate_to_ils(g.currency, today)
         except Exception:  # noqa: BLE001 — a missing rate just means we can't count it
             continue
-        out.append((g.number, o.category_id or "MATERIAL", (o.amount_est * r_o / r_g).quantize(Q), o))
+        out.append((g.number, o.category_id or "MATERIAL",
+                    (o.amount_est * r_o / r_g / vat_divisor(g, o.category_id or "MATERIAL")).quantize(Q), o))
     return out
 
 
@@ -294,10 +295,6 @@ def eligible(c: Candidate, s: GrantState, today):
         return False, ("הסתיים" if s.days_left < 0 else f"נותרו {s.days_left} ימים (סף {g.order_cutoff_days})")
     if g.start_date and (g.start_date - today).days > 30:
         return False, "טרם התחיל"
-    if c.order.project_id:
-        allowed = c.order.project.eligible_grant_numbers()
-        if allowed and g.number not in allowed:
-            return False, "לא משויך לפרויקט של ההזמנה"
     if c.category in s.banned:
         return False, "הסעיף אסור לפי כללי המענק"
     if s.total <= 0:
@@ -321,8 +318,17 @@ def margin_for(c, s, p):
     return Decimal(str(p["fx_margin"])) if c.currency != s.grant.currency else Decimal("0")
 
 
+def vat_divisor(grant, category=None):
+    """1 for a grant that pays VAT (the order's price is charged in full); 1.18 for one that does not:
+    the price paid from it is the price before VAT. Salary and services carry no VAT to begin with, so
+    for them the price stays the price whatever the grant."""
+    if grant.vat_required or category in settings.RESOLVE_DEFAULTS["vat_free_categories"]:
+        return Decimal("1")
+    return Decimal(str(settings.RESOLVE_DEFAULTS["vat_rate"]))
+
+
 def to_grant_ccy(amount_ils, c, s, p):
-    return (amount_ils * (1 + margin_for(c, s, p)) / s.rate).quantize(Q)
+    return (amount_ils * (1 + margin_for(c, s, p)) / s.rate / vat_divisor(s.grant, c.category)).quantize(Q)
 
 
 def collect(today, sap_as_of, p):
@@ -334,11 +340,11 @@ def collect(today, sap_as_of, p):
         # Backtest: re-decide the last N days of real purchases as if they were new requests.
         # SAP balances already include them, so capacity is understated.
         qs = (OrderRequest.objects.filter(is_current=True, date_requested__gte=today - timedelta(days=replay))
-              .exclude(status="canceled").select_related("project", "category"))
+              .exclude(status="canceled").select_related("category"))
         already = set()
     else:
         qs = (OrderRequest.objects.filter(is_current=True, status__in=OPEN_STATUSES)
-              .select_related("project", "category"))
+              .select_related("category"))
     for o in qs:
         if not replay and o.date_requested and (today - o.date_requested).days > p["lookback_days"]:
             buckets["skipped"].append((o, f"הוגשה ב-{o.date_requested:%d/%m/%Y}, לפני יותר מ-{p['lookback_days']} ימים"))
@@ -371,12 +377,8 @@ def collect(today, sap_as_of, p):
 
 def cost(c: Candidate, s: GrantState, p):
     urgency = 0.5 ** (max(s.days_left if s.days_left is not None else 3650, 0) / p["urgency_halflife_days"])
-    weight = 0
-    if c.order.project_id:
-        pg = c.order.project.projectgrant_set.filter(grant=s.grant).first()
-        weight = pg.weight if pg else 0
     val = (1.0 - p["w_urgency"] * urgency + p["w_reserve"] * s.grant.is_reserve
-           - p["w_priority"] * (s.grant.pi_priority + weight)
+           - p["w_priority"] * s.grant.pi_priority
            + p["w_fx"] * (c.currency != s.grant.currency))
     return max(val, 0.05), urgency
 
@@ -435,6 +437,9 @@ def explain(c, s, avail_cat, urgency, amount_grant, cat_names=None, ranked=None,
     if c.currency != cur:
         pct = round(float(settings.RESOLVE_DEFAULTS["fx_margin"]) * 100, 1)
         warn.append(f"ההזמנה ב-{c.currency} והמענק ב-{cur}. מוסיפים {pct:g}% כגיבוי למקרה שהשער יזוז.")
+    if vat_divisor(g, c.category) != 1:
+        warn.append(f"המענק לא משלם מע״מ, ולכן יורד ממנו המחיר לפני מע״מ (מחולק ב-"
+                    f"{settings.RESOLVE_DEFAULTS['vat_rate']:g}).")
     if manual:
         warn.append("בחרת מענק אחר מההמלצה.")
     if base > 0 and left / base < Decimal("0.05"):
@@ -516,7 +521,7 @@ def compute(today=None, sap_as_of=None, **overrides):
         for o in usable:
             num = o.state.grant.number
             x[i, num] = A[i] * pulp.LpVariable(f"y_{i}_{num}", cat="Binary")
-            k[i, num] = float((1 + margin_for(c, o.state, p)) / o.state.rate)
+            k[i, num] = float((1 + margin_for(c, o.state, p)) / o.state.rate / vat_divisor(o.state.grant, c.category))
             costs[i, num] = o.cost
     prob += pulp.lpSum(costs[key] * x[key] for key in x) + pulp.lpSum(BIG * u[i] for i in u)
     for i, c in enumerate(cands):
@@ -586,7 +591,7 @@ def locked_grants(numbers):
 
 def locked_orders(ids):
     """The orders being approved, locked (see `locked_grants` for why of=("self",))."""
-    return OrderRequest.objects.select_for_update(of=("self",)).filter(pk__in=ids).select_related("project")
+    return OrderRequest.objects.select_for_update(of=("self",)).filter(pk__in=ids)
 
 
 class ApprovalError(Exception):
@@ -666,7 +671,7 @@ def approve_plans(decisions, user="", today=None, edited=None):
             new_allocs.append(Allocation(
                 order=o, grant=s.grant, category_id=c.category, amount_orig=o.amount_est.quantize(Q),
                 currency_orig=c.currency, amount_ils=ils, amount_grant_ccy=amt_g,
-                fx_rate=(c.rate * (1 + margin_for(c, s, p)) / s.rate).quantize(R6), fx_date=today,
+                fx_rate=(c.rate * (1 + margin_for(c, s, p)) / s.rate / vat_divisor(s.grant, c.category)).quantize(R6), fx_date=today,
                 status=Allocation.Status.APPROVED, decided_by=user, decided_at=timezone.now(),
                 reason=reason_txt))
         if errors:

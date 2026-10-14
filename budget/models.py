@@ -235,6 +235,9 @@ class Grant(models.Model):
     is_reserve = models.BooleanField(
         "מענק רזרבה", default=False,
         help_text="מענק גמיש/ארוך שעדיף לשמור (קתדרות, תקציב מעבדה). נקבע אוטומטית לפי סוג בייבוא הראשון.")
+    vat_required = models.BooleanField(
+        "מצריך תשלום מע״מ", default=True,
+        help_text="כבוי = המענק לא משלם מע״מ: מהמענק יורד המחיר לפני מע״מ (מחולק ב-1.18)")
     order_cutoff_days = models.PositiveSmallIntegerField(
         "ימי חסימה לפני סיום", default=30,
         help_text="אין להקצות הזמנה חדשה למענק שנשארו לו פחות ימים מזה")
@@ -441,12 +444,15 @@ class OrderRequest(models.Model):
     comments = models.TextField(blank=True)
 
     # lab-owned fields (preserved across imports)
-    project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.SET_NULL, verbose_name="פרויקט")
+    project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.SET_NULL, verbose_name="פרויקט (ישן)")  # legacy: no longer set or read
     category = models.ForeignKey(BudgetCategory, null=True, blank=True, on_delete=models.SET_NULL, verbose_name="סעיף")
     amount_est = models.DecimalField("סכום", **MONEY, null=True, blank=True)
     amount_currency = models.CharField("מטבע", max_length=3, default="ILS", validators=[validate_currency])
     amount_source = models.CharField(max_length=10, choices=AmountSource.choices, default=AmountSource.NONE)
     lab_notes = models.TextField("הערות מעבדה", blank=True)
+    # What the "פרויקט" column shows: free text typed by the lab (suggestions come from the grants table).
+    # Empty = the request's GRANT_ID from LabSuit is shown. Display only: nothing in the funding logic reads it.
+    project_text = models.CharField("פרויקט", max_length=200, blank=True)
 
     LABSUIT_FIELDS = [
         "item_name", "catalog_number", "manufacturer", "supplier", "item_type", "requested_by",

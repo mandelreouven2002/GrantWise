@@ -14,7 +14,7 @@ from django.core.exceptions import ValidationError
 from django.db.models import Q
 
 from .models import (BudgetCategory, BudgetReportLine, FxRate, Grant, GrantLine,
-                     GrantRule, ImportBatch, InventoryItem, OrderRequest, Project, ProjectGrant,
+                     GrantRule, ImportBatch, InventoryItem, OrderRequest,
                      Reservation, TrackedCurrency)
 
 
@@ -22,7 +22,7 @@ from .models import (BudgetCategory, BudgetReportLine, FxRate, Grant, GrantLine,
 class Col:
     field: str
     label: str
-    kind: str = "text"      # text|num|money|int|date|bool|select|currency|category|project|grant|ro|calc|line
+    kind: str = "text"      # text|suggest|num|money|int|date|bool|select|currency|category|grant|ro|calc|line
     choices: list | None = None
     width: str = ""
     required: bool = False  # for the add-row form
@@ -59,7 +59,7 @@ def _grant_choices():
     return [(g.number, f"{g.number} · {g.currency}") for g in Grant.objects.order_by("number")]
 
 
-FK_KINDS = {"category", "grant", "project"}   # stored as <field>_id, edited with a select
+FK_KINDS = {"category", "grant"}   # stored as <field>_id, edited with a select
 
 
 def _currency_choices():
@@ -68,12 +68,12 @@ def _currency_choices():
                                                            .values_list("code", flat=True)]
 
 
-def _project_choices():
-    return [("", "-")] + [(str(p.pk), p.name) for p in Project.objects.filter(is_active=True).order_by("name")]
-
-
+# every budget category of the SAP grants file, in its order (the table hides the ones nobody has)
 LINE_CATS = [("SALARY", "שכר"), ("MATERIAL", "חומרים"), ("EQUIPMENT", "ציוד"), ("SERVICE", "שירותים"),
-             ("GENERAL", "כללי")]
+             ("TRAVEL_EXT", "נסיעות לחו״ל"), ("TRAVEL_INT", "נסיעות בארץ"), ("BOOKS", "ספרים"),
+             ("CONFERENCE", "אירוח וכנסים"), ("OFFICE", "משרדיות"), ("PUBLICATION", "פרסומים"),
+             ("REPORTING", "דיווח"), ("OVERHEAD", "תקורה"), ("SELF", "עצמי"), ("OTHER", "אחר"),
+             ("GENERAL", "כללי (מאגר)")]
 STATUSES = [(s, s) for s in ["requested", "approved", "ordered", "received", "canceled"]]
 
 TABLES = {t.key: t for t in [
@@ -81,6 +81,7 @@ TABLES = {t.key: t for t in [
           add=["number", "sponsor", "currency", "start_date", "end_date", "balance_total"],
           cols=[Col("number", "מענק", "ro", required=True), Col("sponsor", "גורם מממן", width="w-m"),
                 Col("currency", "מטבע", "currency", required=True),
+                Col("vat_required", "מע״מ", "bool"),
                 Col("end_date", "סיום", "date", required=True), Col("days", "ימים לסיום", "calc"),
                 *[Col(f"line:{c}", n, "line") for c, n in LINE_CATS],
                 Col("balance_total", "יתרה כוללת", "money"), Col("pending", "ממתין", "calc"),
@@ -91,15 +92,15 @@ TABLES = {t.key: t for t in [
                 Col("is_active", "פעיל", "bool", hidden=True),
                 Col("start_date", "התחלה", "date", hidden=True)]),
     Table("orders", OrderRequest, "הזמנות ודרישות", source="labsuit_orders",
-          search=["item_name", "catalog_number", "supplier", "po_number", "grant_label", "requested_by"],
+          search=["item_name", "catalog_number", "supplier", "po_number", "grant_label", "project_text", "requested_by"],
           add=["item_name", "requested_by", "supplier", "catalog_number", "quantity", "amount_est",
                "amount_currency", "category", "grant_label"],
           deletable=True,
           cols=[Col("date_requested", "תאריך", "date"), Col("item_name", "פריט", width="w-l", required=True),
                 Col("amount_est", "סכום", "money"), Col("amount_currency", "מטבע", "currency"),
-                Col("status", "סטטוס", "select", STATUSES), Col("grant_label", "GRANT_ID", width="w-m"),
+                Col("status", "סטטוס", "select", STATUSES), Col("project_text", "פרויקט", "suggest", width="w-m"),
                 Col("category", "סעיף", "category"),
-                Col("project", "פרויקט", "project"), Col("requested_by", "מבקש/ת", width="w-m"),
+                Col("requested_by", "מבקש/ת", width="w-m"),
                 Col("supplier", "ספק", width="w-m"), Col("po_number", "הזמנת רכש"), Col("quantity", "כמות", "num"),
                 Col("amount_source", "מקור סכום", "ro"), Col("quote_pdf", "הצעת מחיר", "calc"),
                 Col("lab_notes", "הערות", width="w-l")]),
@@ -107,28 +108,11 @@ TABLES = {t.key: t for t in [
           add=["date", "currency", "rate_to_ils"],
           cols=[Col("date", "תאריך", "date", required=True), Col("currency", "מטבע", "currency", required=True),
                 Col("rate_to_ils", "₪ ליחידה", "num", required=True), Col("source", "מקור", "ro")]),
-    Table("reservations", Reservation, "שריונים", deletable=True,
-          add=["category", "amount", "until", "note"],
-          cols=[Col("category", "סעיף", "category", required=True), Col("amount", "סכום (במטבע המענק)", "money", required=True),
-                Col("until", "עד", "date"), Col("note", "הערה", width="w-l")]),
-    Table("rules", GrantRule, "כללי מענק", deletable=True,
-          add=["category", "allowed", "extra_allowance", "note"],
-          cols=[Col("category", "סעיף", "category", required=True), Col("allowed", "מותר", "bool"),
-                Col("extra_allowance", "חריגה מותרת", "money"), Col("note", "הערה", width="w-l")]),
-    Table("projectgrants", ProjectGrant, "פרויקטים מורשים", deletable=True,
-          add=["project", "weight"],
-          cols=[Col("project", "פרויקט", "project", required=True), Col("weight", "העדפה", "int")]),
-    # ---- settings
     Table("currencies", TrackedCurrency, "מטבעות", per_page=200,
           add=["code", "name_he"],
           cols=[Col("code", "קוד", "ro", required=True), Col("name_he", "שם"), Col("rate", "₪ ליחידה", "calc"),
                 Col("rate_date", "תאריך השער", "calc"), Col("source", "מקור", "ro"),
                 Col("is_active", "פעיל", "bool")]),
-    Table("projects", Project, "פרויקטים", deletable=True, per_page=500,
-          add=["name", "parent", "owner"],
-          cols=[Col("name", "שם", width="w-l", required=True), Col("parent", "פרויקט-על", "project"),
-                Col("owner", "אחראי/ת", width="w-m"), Col("is_active", "פעיל", "bool"),
-                Col("orders", "הזמנות", "calc")]),
     Table("users", User, "משתמשים", per_page=200,
           add=["username", "password", "first_name", "email", "is_superuser"],
           add_only=[Col("password", "סיסמה", required=True)],
@@ -155,6 +139,9 @@ def cell(col, obj, extra=None):
     extra = extra or {}
     if col.kind == "calc":
         return dict(col=col, value=extra.get(col.field, ""), ro=True)
+    if col.kind == "suggest":      # free text typed by the lab, else the request's GRANT_ID from LabSuit
+        v = getattr(obj, col.field) or getattr(obj, "grant_label", "")
+        return dict(col=col, value=v or "")
     if col.kind == "line":
         v = extra.get(col.field)
         return dict(col=col, value=fmt_num(v), neg=v is not None and v < 0,
@@ -181,8 +168,6 @@ def choices_for(col):
         return [("", "—")] + _cat_choices()
     if col.kind == "grant":
         return [("", "—")] + _grant_choices()
-    if col.kind == "project":
-        return _project_choices()
     if col.kind == "currency":
         return _currency_choices()
     if col.choices:
@@ -227,8 +212,6 @@ def set_value(table, obj, name, raw):
     # side effects
     if isinstance(obj, OrderRequest) and name == "amount_est":
         obj.amount_source = OrderRequest.AmountSource.MANUAL if obj.amount_est else OrderRequest.AmountSource.NONE
-    if isinstance(obj, Project) and name == "parent" and obj.parent_id == obj.pk:
-        raise ValidationError("פרויקט לא יכול להיות פרויקט-העל של עצמו")
     obj.full_clean(validate_unique=False, exclude=[f.name for f in obj._meta.fields if f.name != name])
     obj.save()
     return obj
@@ -238,10 +221,6 @@ def _fk_value(col, raw):
     raw = "" if raw is None else str(raw).strip()
     if raw in ("", "-"):
         return None
-    if col.kind == "project":
-        if not Project.objects.filter(pk=raw).exists():
-            raise ValidationError("פרויקט לא קיים — אפשר להוסיף אותו בהגדרות → פרויקטים")
-        return int(raw)
     return raw
 
 
@@ -296,7 +275,7 @@ def create_row(table, data, parent=None):
         obj.last_batch = _manual_batch(ImportBatch.Source.SAP_GRANTS)
     if table.key == "fx":
         obj.source = "manual"
-    if parent is not None:          # reservations / rules / project links belong to a grant
+    if parent is not None:          # reservations / rules belong to a grant
         obj.grant = parent
     for col in table.add_cols():
         if col.field == "number":
