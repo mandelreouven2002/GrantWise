@@ -1303,6 +1303,13 @@ class MaterialsAndOtherPagesTests(TestCase):
         self.assertNotIn("quoted_total_incl_vat", oth)                              # VAT plays no role there
         self.assertContains(self.client.get("/orders/"), "עדכון ממקור אחר")
         self.assertNotContains(self.client.get("/other/"), "עדכון ממקור אחר")
+        # both pages can add a row, each to its own table
+        mat, oth = self.client.get("/orders/"), self.client.get("/other/")
+        self.assertContains(mat, 'data-open="add-orders"')
+        self.assertContains(oth, 'data-open="add-orders_other"')
+        self.assertContains(oth, 'action="/api/orders_other/new/"')
+        self.assertContains(oth, 'name="amount_est"')                                # the typed amount, no VAT totals
+        self.assertNotContains(oth, 'name="quoted_total_incl_vat"')
 
     def test_changing_the_category_moves_the_request_to_the_other_page(self):
         import json

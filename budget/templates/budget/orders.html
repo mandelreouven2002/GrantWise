@@ -38,7 +38,8 @@
 
     <span class="spacer"></span>
 
-    {% if kind == "materials" %}{% include "budget/_actions.html" with default_mode="replace" %}{% endif %}
+    {# the update-from-LabSuit buttons show only for the table that has a source (materials); both have "add row" #}
+    {% include "budget/_actions.html" with default_mode="replace" %}
 </div>
 
 <form class="toolbar" method="get">
