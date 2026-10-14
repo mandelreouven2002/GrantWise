@@ -217,8 +217,7 @@ def order_file(request, pk):
 
 def _resolve_params(request):
     p = request.GET
-    submitted = "lookback" in p        # an unchecked checkbox sends nothing
-    return dict(respect_labels=(p.get("labels") == "1") if submitted else False,
+    return dict(respect_labels=False,
                 lookback_days=int(p.get("lookback") or 180))
 
 
