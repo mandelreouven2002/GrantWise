@@ -13,7 +13,7 @@ import pymupdf
 
 from budget.evaluate_quotes import main
 from budget.quote_extraction import ExtractionResult
-from budget.quote_hybrid import ClaudeFallback, evaluate_pdf, validate_claude
+from budget.quote_hybrid import ClaudeFallback, evaluate_pdf, validate_claude, _evidence_on_page
 
 
 def pdf(text="Total excluding VAT after discounts 100.00 ILS\nTotal payable 118.00 ILS"):
@@ -36,6 +36,65 @@ class HybridTests(unittest.TestCase):
     def setUp(self):
         self.data = pdf()
         self.response = payload()
+
+    def test_hebrew_rtl_evidence_order_is_grounded_in_same_summary_row(self):
+        self.assertTrue(_evidence_on_page('סה״כ לתשלום 920.40 ₪', "920.40 ₪ לתשלום כ''סה"))
+
+    def test_unicode_quotes_controls_and_spaces_are_presentation_only(self):
+        self.assertTrue(_evidence_on_page('\u2067סה“כ\u2069 לתשלום\u00a0９２０.４０\u202f₪', "920.40 ₪ לתשלום כ''סה"))
+
+    def test_hebrew_reordered_evidence_does_not_match_unrelated_rows(self):
+        self.assertFalse(_evidence_on_page('סה״כ לתשלום 920.40 ₪', '920.40 ₪ סה״כ לפני הנחה\n950.40 ₪ סה״כ לתשלום'))
+        self.assertFalse(_evidence_on_page('סה״כ לתשלום 920.40 ₪ invented', "920.40 ₪ לתשלום כ''סה"))
+        self.assertFalse(_evidence_on_page('סה״כ לתשלום 920.41 ₪', "920.40 ₪ לתשלום כ''סה"))
+        self.assertFalse(_evidence_on_page('סה״כ לתשלום 920.40 USD', "920.40 ₪ לתשלום כ''סה"))
+
+    def test_reordered_multitotal_section_is_not_matched_by_token_bag(self):
+        self.assertFalse(_evidence_on_page('סה״כ לפני מע״מ 118.00 ₪ סה״כ לתשלום 100.00 ₪',
+            '100.00 ₪ סה״כ לפני מע״מ\n118.00 ₪ סה״כ לתשלום'))
+
+    def test_evidence_does_not_match_signed_or_longer_amount_substring(self):
+        self.assertFalse(_evidence_on_page('920.40 ₪ לתשלום סהכ', '-920.40 ₪ לתשלום סהכ'))
+        self.assertFalse(_evidence_on_page('סהכ לתשלום 920.40', 'סהכ לתשלום 920.400'))
+
+    def test_workorder_logical_hebrew_quotes_with_mock_fallback(self):
+        path = Path(__file__).resolve().parent.parent / 'test-quotes' / 'workorder_19363.pdf'
+        if not path.is_file():
+            self.skipTest('Private real quotation fixture is not present')
+        data = path.read_bytes()
+        for quote in ('סה״כ לתשלום 920.40 ₪', '₪ 920.40 סה"כ לתשלום',
+                      '\u2067סה“כ\u2069 לתשלום\u00a0９２０.４０ ₪'):
+            response = payload(excl=None, incl='920.40')
+            response['evidence']['quoted_total_incl_vat']['text'] = quote
+            with self.subTest(quote=quote):
+                evaluation = evaluate_pdf(data, Mock(return_value=response))
+                self.assertEqual(evaluation.fallback_outcome, 'evaluated')
+                self.assertEqual(evaluation.final.quoted_total_incl_vat, Decimal('920.40'))
+                self.assertIsNone(evaluation.final.quoted_total_excl_vat)
+                self.assertEqual(evaluation.final.extraction_status, 'missing')
+
+    def test_workorder_rejects_wrong_page_amount_and_before_discount(self):
+        path = Path(__file__).resolve().parent.parent / 'test-quotes' / 'workorder_19363.pdf'
+        if not path.is_file():
+            self.skipTest('Private real quotation fixture is not present')
+        data = path.read_bytes()
+        cases = []
+        wrong_page = payload(excl=None, incl='920.40')
+        wrong_page['evidence']['quoted_total_incl_vat'] = {'text': 'סה״כ לתשלום 920.40 ₪', 'page': 2}
+        cases.append(wrong_page)
+        wrong_amount = payload(excl=None, incl='920.41')
+        wrong_amount['evidence']['quoted_total_incl_vat']['text'] = 'סה״כ לתשלום 920.41 ₪'
+        cases.append(wrong_amount)
+        before_discount = payload(excl='780.00', incl='920.40')
+        before_discount['evidence']['quoted_total_excl_vat']['text'] = 'סה״כ לפני הנחה 780.00'
+        before_discount['evidence']['quoted_total_incl_vat']['text'] = 'סה״כ לתשלום 920.40 ₪'
+        cases.append(before_discount)
+        for response in cases:
+            with self.subTest(response=response):
+                evaluation = evaluate_pdf(data, Mock(return_value=response))
+                self.assertEqual(evaluation.fallback_outcome, 'rejected')
+                self.assertIsNone(evaluation.final.quoted_total_excl_vat)
+                self.assertEqual(evaluation.final.quoted_total_incl_vat, Decimal('920.40'))
 
     def test_valid_response_is_grounded(self):
         result = validate_claude(self.response, self.data)

@@ -1,15 +1,18 @@
 """Opt-in local evaluation only. Never used by quotation persistence."""
 import base64
 from copy import deepcopy
+from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
 import hashlib
 import json
 import os
 import re
+import unicodedata
 
 import pymupdf
 import requests
+from .quote_diagnostics import safe_exception, FallbackDiagnosticError
 
 from .quote_extraction import (EXTRACTION_PROMPT, FIELDS, extract_pdf, validate_result,
                                _normalize_label, _TOTAL, _NON_FINAL, _EXCL, _INCL)
@@ -71,8 +74,54 @@ class ClaudeFallback:
         return json.loads(blocks[0]["text"])
 
 
+def _formatting_text(text):
+    text = unicodedata.normalize("NFKC", text)
+    text = text.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"}))
+    # Presentation controls are not document words or monetary signs.
+    text = re.sub(r"[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", text)
+    return _normalize_label(text).casefold()
+
+
 def _normalized(text):
-    return re.sub(r"\s+", "", _normalize_label(text)).casefold()
+    return re.sub(r"\s+", "", _formatting_text(text))
+
+
+def _evidence_tokens(text):
+    # Keep numerical punctuation/signs exact. Currency spellings are not freely
+    # substituted: the same printed notation must be present in this path.
+    return re.findall(r"\d+(?:[,.]\d+)*|[a-zא-ת]+|[^\w\s]", _formatting_text(text))
+
+
+def _evidence_on_page(quote, page_text):
+    compact_quote, compact_page = _normalized(quote), _normalized(page_text)
+    if not compact_quote:
+        return False
+    start = compact_page.find(compact_quote)
+    while start >= 0:
+        end = start + len(compact_quote)
+        # A substring must not hide a monetary sign or match part of a number.
+        left_ok = not (compact_quote[0].isdigit() and start > 0
+                       and compact_page[start - 1] in "0123456789.,-−+")
+        right_ok = not (compact_quote[-1].isdigit() and end < len(compact_page)
+                        and compact_page[end] in "0123456789.,-−")
+        if left_ok and right_ok:
+            return True
+        start = compact_page.find(compact_quote, start + 1)
+    # RTL layout may move label, amount and symbol around on the same row.
+    # No fuzzy matching or page-wide token search: require the complete token
+    # multiset in a contiguous 1–3-line window, with exactly one monetary number.
+    # This prevents joining the label from one total to another row's amount.
+    tokens = _evidence_tokens(quote)
+    numbers = [token for token in tokens if re.fullmatch(r"\d+(?:[,.]\d+)*", token)]
+    if not re.search(r"[א-ת]", quote) or len(numbers) != 1:
+        return False
+    wanted = Counter(tokens)
+    lines = [line for line in page_text.splitlines() if line.strip()]
+    for start in range(len(lines)):
+        for size in range(1, 4):
+            if Counter(_evidence_tokens("\n".join(lines[start:start + size]))) == wanted:
+                return True
+    return False
 
 
 def validate_claude(payload, pdf_bytes):
@@ -99,29 +148,30 @@ def validate_claude(payload, pdf_bytes):
         currency = payload["amount_currencies"][name]
         if amount is None:
             if support is not None or currency is not None:
-                raise ValueError("Missing amount must have null evidence and currency")
+                raise FallbackDiagnosticError("validation", "null_amount_metadata_invalid", field=name)
             continue
         if not isinstance(amount, str) or not re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", amount):
-            raise ValueError("Amount must be a nonnegative decimal string")
+            raise FallbackDiagnosticError("validation", "amount_format_invalid", field=name)
         if not isinstance(support, dict) or set(support) != {"text", "page"}:
-            raise ValueError("Invalid evidence")
+            raise FallbackDiagnosticError("validation", "evidence_invalid", field=name)
         if not isinstance(support["text"], str) or not support["text"].strip():
-            raise ValueError("Empty evidence")
+            raise FallbackDiagnosticError("validation", "evidence_empty", field=name)
         if type(support["page"]) is not int or not 1 <= support["page"] <= len(pages):
-            raise ValueError("Invalid evidence page")
+            raise FallbackDiagnosticError("validation", "evidence_page_invalid", field=name)
         if currency is not None and (not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency)):
-            raise ValueError("Invalid amount currency")
-        printed = re.findall(r"(?<![\w.,])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?(?![\d.])", support["text"])
+            raise FallbackDiagnosticError("validation", "amount_currency_invalid", field=name)
+        formatted_support = _formatting_text(support["text"])
+        printed = re.findall(r"(?<![\w.,])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?(?![\d.])", formatted_support)
         if Decimal(amount) not in {Decimal(number.replace(',', '')) for number in printed}:
-            raise ValueError("Evidence does not contain the amount")
+            raise FallbackDiagnosticError("validation", "amount_not_in_evidence", field=name)
         page_text = pages[support["page"] - 1]
         if not page_text.strip():
             issues.append(f"visual_review_required:{name}")
-        elif _normalized(support["text"]) not in _normalized(page_text):
-            raise ValueError("Evidence is not present on the cited page")
-        normalized = _normalize_label(support["text"])
+        elif not _evidence_on_page(support["text"], page_text):
+            raise FallbackDiagnosticError("validation", "evidence_not_on_page", field=name)
+        normalized = formatted_support
         if _NON_FINAL.search(normalized) or not _TOTAL.search(normalized):
-            raise ValueError("Evidence identifies a non-final amount or lacks a total label")
+            raise FallbackDiagnosticError("validation", "non_final_or_unlabelled_evidence", field=name)
         if name.endswith("excl_vat") and not _EXCL.search(normalized):
             issues.append(f"exclusive_total_context_uncertain:{name}")
         if name.endswith("incl_vat") and not _INCL.search(normalized):
@@ -144,6 +194,7 @@ class HybridEvaluation:
     rules: object
     final: object
     fallback_outcome: str
+    diagnostic: dict | None = None
 
 
 def evaluate_pdf(pdf_bytes, fallback=None):
@@ -152,15 +203,18 @@ def evaluate_pdf(pdf_bytes, fallback=None):
         return HybridEvaluation(rules, rules, "not_needed")
     if fallback is None:
         return HybridEvaluation(rules, rules, "dry_run_candidate")
+    stage = "provider"
     try:
-        candidate = validate_claude(fallback(pdf_bytes, EXTRACTION_PROMPT), pdf_bytes)
+        payload = fallback(pdf_bytes, EXTRACTION_PROMPT)
+        stage = "validation"
+        candidate = validate_claude(payload, pdf_bytes)
     except Exception as exc:
         final = deepcopy(rules)
         final.issues.append(f"fallback_rejected:{type(exc).__name__}")
         safe_code = getattr(exc, "safe_code", "")
         if isinstance(safe_code, str) and re.fullmatch(r"bedrock_http_\d{3}", safe_code):
             final.issues.append(safe_code)
-        return HybridEvaluation(rules, final, "rejected")
+        return HybridEvaluation(rules, final, "rejected", safe_exception(exc, stage))
     if candidate.extraction_status == "failed":
         return HybridEvaluation(rules, rules, "failed")
     final = deepcopy(candidate)
