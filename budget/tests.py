@@ -1864,6 +1864,9 @@ class AiAssistTests(TestCase):
             page = self.post("בלי המענק האירופי")
         self.assertContains(page, "איזה מענק הכוונה: A או B?")
         self.assertNotIn("ai_constraints", self.client.session)
+        # an "info" message must not carry the class of the ⓘ tooltip icon (a 17px circle: the text came out vertical)
+        self.assertContains(page, '<li class="notice-info">')
+        self.assertNotContains(page, '<li class="info">')
 
     def test_unknown_ids_from_the_model_are_ignored(self):
         reply = {"constraints": [{"type": "exclude_grant", "grant": "HALLUCINATED"}], "summary_he": "x"}
