@@ -1,134 +1,24 @@
-
-<!DOCTYPE html>
-<html lang="he" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1">
-    <title>GrantWise Dashboard</title>
-
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 30px;
-            background: #f5f6fa;
-            color: #202638;
-        }
-
-        .container {
-            max-width: 1150px;
-            margin: auto;
-        }
-
-        h1 {
-            margin-bottom: 8px;
-        }
-
-        .subtitle {
-            color: #64748b;
-            margin-bottom: 30px;
-        }
-
-        .panel {
-            background: white;
-            border-radius: 14px;
-            padding: 26px;
-            margin-bottom: 24px;
-            box-shadow: 0 2px 10px #0000000c;
-        }
-
-        label {
-            display: block;
-            font-weight: bold;
-            margin-bottom: 12px;
-        }
-
-        select {
-            width: 100%;
-            max-width: 360px;
-            padding: 13px;
-            font-size: 16px;
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            background: white;
-        }
-
-        .chart-row {
-            display: grid;
-            grid-template-columns: 130px 1fr 135px;
-            gap: 16px;
-            align-items: center;
-            padding: 12px 0;
-            border-bottom: 1px solid #f1f5f9;
-        }
-
-        .chart-row:last-child {
-            border-bottom: none;
-        }
-
-        .grant-name {
-            font-weight: bold;
-            direction: ltr;
-            text-align: right;
-            overflow-wrap: anywhere;
-        }
-
-        .bar-track {
-            background: #edf0f8;
-            height: 28px;
-            border-radius: 6px;
-            overflow: hidden;
-        }
-
-        .bar {
-            background: #5865d9;
-            height: 100%;
-            border-radius: 6px;
-        }
-
-        .amount {
-            font-weight: bold;
-            direction: ltr;
-            text-align: left;
-            white-space: nowrap;
-        }
-
-        .negative {
-            color: #dc2626;
-        }
-
-        .empty {
-            text-align: center;
-            color: #64748b;
-            padding: 25px;
-        }
-
-        .note {
-            color: #64748b;
-            font-size: 13px;
-        }
-
-        @media (max-width: 650px) {
-            body {
-                padding: 15px;
-            }
-
-            .chart-row {
-                grid-template-columns: 80px 1fr 100px;
-                gap: 8px;
-                font-size: 12px;
-            }
-        }
-    </style>
-</head>
-
-<body>
-<div class="container">
+{% extends "budget/base.html" %}
+{% block title %}סקירה · LabFund{% endblock %}
+{% block content %}
+<style>
+  .gw-home{max-width:1150px;margin:0 auto}
+  .gw-home .subtitle{color:#64748b;margin:0 0 24px}
+  .gw-home .panel{background:#fff;border-radius:14px;padding:26px;margin-bottom:24px;box-shadow:0 2px 10px #0000000c}
+  .gw-home label{display:block;font-weight:bold;margin-bottom:12px}
+  .gw-home select{width:100%;max-width:360px;padding:13px;font-size:16px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+  .gw-home .chart-row{display:grid;grid-template-columns:130px 1fr 135px;gap:16px;align-items:center;padding:12px 0;border-bottom:1px solid #f1f5f9}
+  .gw-home .chart-row:last-child{border-bottom:none}
+  .gw-home .grant-name{font-weight:bold;direction:ltr;text-align:right;overflow-wrap:anywhere}
+  .gw-home .bar-track{background:#edf0f8;height:28px;border-radius:6px;overflow:hidden}
+  .gw-home .bar{background:#5865d9;height:100%;border-radius:6px}
+  .gw-home .amount{font-weight:bold;direction:ltr;text-align:left;white-space:nowrap}
+  .gw-home .negative{color:#dc2626}
+  .gw-home .empty{text-align:center;color:#64748b;padding:25px}
+  .gw-home .note{color:#64748b;font-size:13px}
+  @media (max-width:650px){.gw-home .panel{padding:15px}.gw-home .chart-row{grid-template-columns:80px 1fr 100px;gap:8px;font-size:12px}}
+</style>
+<div class="gw-home">
 
     <h1>GrantWise Dashboard</h1>
     <p class="subtitle">
@@ -212,5 +102,4 @@
     </div>
 
 </div>
-</body>
-</html>
+{% endblock %}
