@@ -423,7 +423,7 @@ class DashboardTests(TestCase):
         nav = re.sub(r"\s+", " ", self.client.get("/orders/").content.decode())     # the nav is multi-line HTML
         self.assertIn("> המלצות </a>", nav)
         self.assertLess(nav.index("> הזמנות חומרים </a>"), nav.index("> אחר </a>"))
-        self.assertLess(nav.index("> אחר </a>"), nav.index("> מענקים </a>"))
+        self.assertLess(nav.index("> מענקים </a>"), nav.index("> הזמנות חומרים </a>"))     # nav order since the redesign
 
     def test_inline_edit_cell_and_grant_line(self):
         r = self.post_json("/api/grants/A/", {"field": "pi_priority", "value": "2"})
@@ -1521,30 +1521,57 @@ class AiAssistTests(TestCase):
 
     # ---- the model call
 
-    def converse_reply(self, tool_input):
+    def converse_reply(self, obj, stop="end_turn"):
+        import json as _json
+
         class R:
             status_code = 200
+            headers = {}
             def json(self_inner):
-                return {"output": {"message": {"content": [{"toolUse": {"name": "set_constraints", "input": tool_input}}]}},
-                        "usage": {"inputTokens": 1, "outputTokens": 1}}
+                return {"output": {"message": {"role": "assistant", "content": [{"text": _json.dumps(obj)}]}},
+                        "stopReason": stop, "usage": {"inputTokens": 1, "outputTokens": 1}}
         return R()
 
-    def test_request_shape_limits_and_forced_tool(self):
+    def test_request_is_made_like_the_pdf_review(self):
         from budget import ai_assist
-        with mock.patch.dict("os.environ", self.ENV), \
-                mock.patch("budget.ai_assist.requests.post", return_value=self.converse_reply({"constraints": []})) as post:
+        with mock.patch.dict("os.environ", self.ENV, clear=True), \
+                mock.patch("budget.quote_bedrock._post_once", return_value=self.converse_reply({"constraints": []})) as post:
             out = ai_assist.ask("x" * 1000, "CURRENT:\nnone")
         self.assertEqual(out, {"constraints": []})
         url = post.call_args.args[0]
         body = post.call_args.kwargs["json"]
         self.assertTrue(url.startswith("https://bedrock-runtime.eu-west-1.amazonaws.com/model/"))
-        self.assertIn("/converse", url)
-        self.assertEqual(post.call_args.kwargs["headers"], {"Authorization": "Bearer test-key"})
-        self.assertEqual(body["inferenceConfig"], {"maxTokens": 600, "temperature": 0})
-        self.assertEqual(body["toolConfig"]["toolChoice"], {"tool": {"name": "set_constraints"}})
+        self.assertIn("global.anthropic.claude-haiku-5-5/converse", url)
+        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(body["inferenceConfig"], {"maxTokens": 600})              # no temperature
+        self.assertNotIn("toolConfig", body)                                       # JSON is asked for in the prompt
+        self.assertEqual(body["additionalModelRequestFields"], {"thinking": {"type": "disabled"}})
         sent = body["messages"][0]["content"][0]["text"]
         self.assertLessEqual(len(sent.split("INSTRUCTION:\n")[1]), ai_assist.MAX_INSTRUCTION_CHARS)
         self.assertIn("exclude_grant", body["system"][0]["text"])
+
+    def test_model_id_comes_from_the_same_variable_as_the_pdf_review(self):
+        from budget import ai_assist
+        env = {**self.ENV, "BEDROCK_MODEL_ID": "eu.anthropic.claude-haiku-5-5"}
+        with mock.patch.dict("os.environ", env, clear=True), \
+                mock.patch("budget.quote_bedrock._post_once", return_value=self.converse_reply({"constraints": []})) as post:
+            ai_assist.ask("hi", "ctx")
+        self.assertIn("eu.anthropic.claude-haiku-5-5/converse", post.call_args.args[0])
+
+    def test_reply_in_a_markdown_fence_is_accepted_and_truncation_is_not(self):
+        from budget import ai_assist
+        class Fenced:
+            status_code = 200
+            headers = {}
+            def json(self):
+                return {"output": {"message": {"role": "assistant", "content": [
+                    {"text": "```json\n{\"constraints\": [], \"summary_he\": \"ok\"}\n```"}]}}, "stopReason": "end_turn"}
+        with mock.patch.dict("os.environ", self.ENV, clear=True), mock.patch("budget.quote_bedrock._post_once", return_value=Fenced()):
+            self.assertEqual(ai_assist.ask("hi", "ctx")["summary_he"], "ok")
+        with mock.patch.dict("os.environ", self.ENV, clear=True), \
+                mock.patch("budget.quote_bedrock._post_once", return_value=self.converse_reply({}, stop="max_tokens")):
+            with self.assertRaises(ai_assist.AiError):
+                ai_assist.ask("hi", "ctx")
 
     def test_http_error_is_reported_with_the_message(self):
         from budget import ai_assist
@@ -1553,11 +1580,36 @@ class AiAssistTests(TestCase):
             text = ""
             def json(self):
                 return {"message": "The provided model identifier is invalid."}
-        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.requests.post", return_value=R()):
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.quote_bedrock._post_once", return_value=R()):
             with self.assertRaises(ai_assist.AiError) as cm:
                 ai_assist.ask("hi", "ctx")
         self.assertIn("400", str(cm.exception))
         self.assertIn("model identifier", str(cm.exception))
+
+    def test_capitalised_message_and_hint_on_403(self):
+        from budget import ai_assist
+        class R:
+            status_code = 403
+            text = ""
+            headers = {"x-amzn-errortype": "AccessDeniedException:http://internal.amazon.com/"}
+            def json(self):
+                return {"Message": "Bearer Token has expired"}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.quote_bedrock._post_once", return_value=R()):
+            with self.assertRaises(ai_assist.AiError) as cm:
+                ai_assist.ask("hi", "ctx")
+        text = str(cm.exception)
+        self.assertIn("403 AccessDeniedException", text)
+        self.assertIn("Bearer Token has expired", text)
+        self.assertIn("bedrock:InvokeModel", text)
+        self.assertNotIn("test-key", text)
+
+    def test_key_is_cleaned_of_quotes_spaces_and_a_bearer_prefix(self):
+        from budget import ai_assist
+        for pasted in ('  "abc123" \n', "Bearer abc123", "abc123"):
+            with mock.patch.dict("os.environ", {**self.ENV, "AWS_BEARER_TOKEN_BEDROCK": pasted}), \
+                    mock.patch("budget.quote_bedrock._post_once", return_value=self.converse_reply({"constraints": []})) as post:
+                ai_assist.ask("hi", "ctx")
+            self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer abc123")
 
     def test_validation_drops_what_was_not_sent_and_merge_replaces_earlier_instructions(self):
         from budget import ai_assist
