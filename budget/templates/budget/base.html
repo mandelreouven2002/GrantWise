@@ -5,10 +5,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
 <title>{% block title %}GrantWise{% endblock %}</title>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700&display=swap" rel="stylesheet">
+
+/* Settings icon next to user */
+.account-settings {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    color: #c9d8e8;
+    text-decoration: none;
+    border-radius: 9px;
+    transition: background .2s, color .2s;
+}
+
+.account-settings:hover,
+.account-settings:focus-visible {
+    background: rgba(255,255,255,.12);
+    color: #45dfe5;
+}
+
+.account-settings svg {
+    width: 22px;
+    height: 22px;
+}
+
+/* Keep settings icon outside the main navigation */
+.account {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
 
 <style>
 :root {
@@ -31,7 +63,9 @@
     --teal:#41d5d9;
 }
 
-* { box-sizing:border-box; }
+* {
+    box-sizing:border-box;
+}
 
 body {
     margin:0;
@@ -41,7 +75,7 @@ body {
     font:14px/1.5 Heebo,system-ui,sans-serif;
 }
 
-/* ========== NAVBAR ========== */
+/* ================= NAVBAR ================= */
 
 header {
     min-height:72px;
@@ -55,29 +89,35 @@ header {
     box-shadow:0 3px 14px rgba(19,43,72,.12);
 }
 
+/* Brand is not clickable */
 header .brand {
     display:flex;
     align-items:center;
-    gap:12px;
+    gap:10px;
     color:white;
-    text-decoration:none;
     padding:9px 0;
+    cursor:default;
 }
 
+/* Icon without a square */
 .brand-icon {
     display:flex;
     align-items:center;
     justify-content:center;
-    width:49px;
-    height:49px;
+    width:50px;
+    height:50px;
     flex-shrink:0;
-    border-radius:12px;
-    background:rgba(65,213,217,.10);
+    background:transparent;
+    border:none;
+    border-radius:0;
+    box-shadow:none;
+    padding:0;
 }
 
 .brand-icon svg {
-    width:43px;
-    height:43px;
+    display:block;
+    width:48px;
+    height:48px;
 }
 
 .brand-words {
@@ -88,7 +128,7 @@ header .brand {
 
 .brand-name {
     color:white;
-    font-size:24px;
+    font-size:25px;
     font-weight:700;
     direction:ltr;
 }
@@ -116,7 +156,7 @@ header nav a {
     font-weight:500;
     padding:23px 16px 18px;
     border-bottom:3px solid transparent;
-    transition:.18s;
+    transition:color .18s,background .18s,border-color .18s;
 }
 
 header nav a:hover {
@@ -165,7 +205,7 @@ header form button:hover {
     background:rgba(255,255,255,.08);
 }
 
-/* ========== MAIN LAYOUT ========== */
+/* ================= MAIN LAYOUT ================= */
 
 main {
     max-width:1640px;
@@ -192,14 +232,18 @@ h2 {
     margin-bottom:18px;
 }
 
-.titlebar .spacer { flex:1; }
+.titlebar .spacer {
+    flex:1;
+}
 
 .sub {
     color:var(--muted);
     margin:4px 0 14px;
 }
 
-.muted { color:var(--muted); }
+.muted {
+    color:var(--muted);
+}
 
 .card {
     background:var(--card);
@@ -210,7 +254,7 @@ h2 {
     box-shadow:0 5px 22px rgba(34,70,111,.035);
 }
 
-/* ========== LABORATORY HERO ========== */
+/* ================= LABORATORY HERO ================= */
 
 .orders-hero {
     position:relative;
@@ -226,9 +270,9 @@ h2 {
     background-image:
         linear-gradient(
             270deg,
-            rgba(244,249,255,.98) 0%,
-            rgba(244,249,255,.88) 34%,
-            rgba(225,241,250,.12) 100%
+            rgba(244,249,255,.85) 0%,
+            rgba(244,249,255,.35) 45%,
+            rgba(225,241,250,.05) 100%
         ),
         url("{% static 'budget/images/lab-background.jpg' %}");
 
@@ -279,7 +323,7 @@ h2 {
     box-shadow:none;
 }
 
-/* ========== STATS ========== */
+/* ================= STATS ================= */
 
 .kpis {
     display:flex;
@@ -320,9 +364,11 @@ h2 {
     text-decoration:none;
 }
 
-.kpi a:hover { color:var(--accent); }
+.kpi a:hover {
+    color:var(--accent);
+}
 
-/* ========== FILTERS ========== */
+/* ================= FILTERS ================= */
 
 .toolbar {
     display:flex;
@@ -332,7 +378,8 @@ h2 {
     margin:12px 0 19px;
 }
 
-input.f, select.f {
+input.f,
+select.f {
     font:inherit;
     padding:9px 12px;
     border:1px solid var(--line);
@@ -342,12 +389,13 @@ input.f, select.f {
     min-height:39px;
 }
 
-input.f:focus, select.f:focus {
+input.f:focus,
+select.f:focus {
     outline:2px solid #b8d3ff;
     border-color:var(--accent);
 }
 
-/* ========== TABLES ========== */
+/* ================= TABLES ================= */
 
 .tbl-wrap {
     overflow:auto;
@@ -363,7 +411,8 @@ table {
     width:100%;
 }
 
-th, td {
+th,
+td {
     padding:0;
     border-bottom:1px solid var(--line);
     text-align:right;
@@ -382,14 +431,19 @@ th {
     padding:12px 9px;
 }
 
-td.ro { padding:10px 9px; }
+td.ro {
+    padding:10px 9px;
+}
 
-td.num, th.num {
+td.num,
+th.num {
     text-align:left;
     direction:ltr;
 }
 
-tr:hover td { background:#f5f9ff; }
+tr:hover td {
+    background:#f5f9ff;
+}
 
 tr.dim td,
 tr.dim input,
@@ -402,7 +456,7 @@ tr.total td {
     background:#f2f6fc;
 }
 
-/* ========== EDITABLE CELLS ========== */
+/* ================= EDITABLE CELLS ================= */
 
 select.cell {
     width:auto;
@@ -414,7 +468,8 @@ select.cell {
     cursor:pointer;
 }
 
-select.cell:hover, select.cell:focus {
+select.cell:hover,
+select.cell:focus {
     appearance:auto;
     -webkit-appearance:auto;
 }
@@ -439,7 +494,9 @@ input[type=date].cell:focus::-webkit-calendar-picker-indicator {
     border-radius:5px;
 }
 
-.cell:hover { border-color:var(--line); }
+.cell:hover {
+    border-color:var(--line);
+}
 
 .cell:focus {
     outline:none;
@@ -454,13 +511,25 @@ input[type=date].cell:focus::-webkit-calendar-picker-indicator {
     min-width:80px;
 }
 
-input[type=date].cell { min-width:118px; }
+input[type=date].cell {
+    min-width:118px;
+}
 
-.cell.w-m { min-width:170px; }
-.cell.w-l { min-width:220px; }
-.cell.w-xl { min-width:300px; }
+.cell.w-m {
+    min-width:170px;
+}
 
-.cell.neg { color:var(--bad); }
+.cell.w-l {
+    min-width:220px;
+}
+
+.cell.w-xl {
+    min-width:300px;
+}
+
+.cell.neg {
+    color:var(--bad);
+}
 
 .cell.saved {
     background:var(--good-bg)!important;
@@ -477,7 +546,7 @@ td.chk {
     padding:0 8px;
 }
 
-/* ========== STATUS ========== */
+/* ================= STATUS ================= */
 
 .tag {
     display:inline-flex;
@@ -498,17 +567,30 @@ td.chk {
     flex:none;
 }
 
-.tag.good::before { background:#9aa5b4; }
-.tag.info::before { background:var(--accent); }
-.tag.warn { color:var(--ink); }
-.tag.warn::before { background:#d99a2b; }
+.tag.good::before {
+    background:#9aa5b4;
+}
+
+.tag.info::before {
+    background:var(--accent);
+}
+
+.tag.warn {
+    color:var(--ink);
+}
+
+.tag.warn::before {
+    background:#d99a2b;
+}
 
 .tag.bad {
     color:var(--bad);
     font-weight:500;
 }
 
-.tag.bad::before { background:var(--bad); }
+.tag.bad::before {
+    background:var(--bad);
+}
 
 .tag.dot {
     margin:0 2px;
@@ -516,7 +598,7 @@ td.chk {
     vertical-align:middle;
 }
 
-/* ========== INFO TOOLTIPS ========== */
+/* ================= INFO TOOLTIPS ================= */
 
 .info {
     position:relative;
@@ -550,7 +632,8 @@ td.chk {
     text-align:start;
 }
 
-.info:hover .tip, .info:focus .tip {
+.info:hover .tip,
+.info:focus .tip {
     display:block;
 }
 
@@ -561,9 +644,11 @@ td.chk {
     gap:8px;
 }
 
-.hint a { color:var(--muted); }
+.hint a {
+    color:var(--muted);
+}
 
-/* ========== BUTTONS ========== */
+/* ================= BUTTONS ================= */
 
 .btn {
     background:linear-gradient(135deg,#376ef0,#1c4bb7);
@@ -580,7 +665,9 @@ td.chk {
     box-shadow:0 2px 7px rgba(37,99,220,.13);
 }
 
-.btn:hover { filter:brightness(1.05); }
+.btn:hover {
+    filter:brightness(1.05);
+}
 
 .btn.ghost {
     background:white;
@@ -601,7 +688,9 @@ td.chk {
     box-shadow:none;
 }
 
-.btn.link:hover { color:var(--bad); }
+.btn.link:hover {
+    color:var(--bad);
+}
 
 form.inline {
     display:inline;
@@ -613,7 +702,9 @@ ul.plain {
     padding-inline-start:18px;
 }
 
-ul.plain li { margin:2px 0; }
+ul.plain li {
+    margin:2px 0;
+}
 
 ul.cols {
     columns:2;
@@ -627,15 +718,20 @@ td.old {
     text-decoration-color:#c8ced8;
 }
 
-td.new { font-weight:500; }
-tr.grp td { border-top:1px solid var(--line); }
+td.new {
+    font-weight:500;
+}
+
+tr.grp td {
+    border-top:1px solid var(--line);
+}
 
 .preview-actions {
     gap:10px;
     margin:6px 0 14px;
 }
 
-/* ========== MENUS ========== */
+/* ================= MENUS ================= */
 
 .menu {
     position:relative;
@@ -667,7 +763,8 @@ tr.grp td { border-top:1px solid var(--line); }
     cursor:pointer;
 }
 
-.menu-list button:hover, .menu-list button:focus {
+.menu-list button:hover,
+.menu-list button:focus {
     background:var(--info-bg);
     outline:none;
 }
@@ -679,9 +776,11 @@ tr.grp td { border-top:1px solid var(--line); }
     margin-top:2px;
 }
 
-/* ========== LABSUIT IMPORT ========== */
+/* ================= LABSUIT IMPORT ================= */
 
-.af-user { margin:12px 0 4px; }
+.af-user {
+    margin:12px 0 4px;
+}
 
 .af-progress {
     text-align:center;
@@ -704,7 +803,9 @@ tr.grp td { border-top:1px solid var(--line); }
 }
 
 @keyframes spin {
-    to { transform:rotate(360deg); }
+    to {
+        transform:rotate(360deg);
+    }
 }
 
 .af-detail pre {
@@ -717,7 +818,7 @@ tr.grp td { border-top:1px solid var(--line); }
     border-radius:6px;
 }
 
-/* ========== MESSAGES ========== */
+/* ================= MESSAGES ================= */
 
 .msgs {
     list-style:none;
@@ -732,8 +833,13 @@ tr.grp td { border-top:1px solid var(--line); }
     background:var(--info-bg);
 }
 
-.msgs li.success { background:var(--good-bg); }
-.msgs li.error { background:var(--bad-bg); }
+.msgs li.success {
+    background:var(--good-bg);
+}
+
+.msgs li.error {
+    background:var(--bad-bg);
+}
 
 .foot {
     margin-top:40px;
@@ -806,7 +912,7 @@ tr.detail h3 {
     margin:0 0 6px;
 }
 
-/* ========== DIALOGS ========== */
+/* ================= DIALOGS ================= */
 
 dialog {
     border:0;
@@ -821,7 +927,9 @@ dialog::backdrop {
     background:rgba(16,24,40,.45);
 }
 
-dialog form { padding:20px; }
+dialog form {
+    padding:20px;
+}
 
 dialog h3 {
     margin:0 0 12px;
@@ -835,7 +943,9 @@ dialog label {
     font-size:13px;
 }
 
-dialog .f { width:100%; }
+dialog .f {
+    width:100%;
+}
 
 dialog .actions {
     display:flex;
@@ -865,7 +975,10 @@ dialog .actions {
     font-weight:500;
 }
 
-.seg { display:flex; gap:8px; }
+.seg {
+    display:flex;
+    gap:8px;
+}
 
 .seg label {
     flex:1;
@@ -885,13 +998,16 @@ dialog .actions {
 .seg small {
     display:block;
     color:var(--muted);
+    font-size:12px;
     margin-top:2px;
 }
 
-/* ========== RESPONSIVE ========== */
+/* ================= RESPONSIVE ================= */
 
 @media(max-width:700px) {
-    ul.cols { columns:1; }
+    ul.cols {
+        columns:1;
+    }
 
     header {
         padding:8px 14px;
@@ -914,8 +1030,13 @@ dialog .actions {
         margin-inline-start:auto;
     }
 
-    main { padding:18px 10px 40px; }
-    .kpi { min-width:44%; }
+    main {
+        padding:18px 10px 40px;
+    }
+
+    .kpi {
+        min-width:44%;
+    }
 
     .orders-hero {
         min-height:155px;
@@ -941,29 +1062,32 @@ dialog .actions {
 
 <header>
 
-    <!-- GrantWise branding -->
-    <a class="brand"
-       href="{% url 'home' %}"
-       aria-label="GrantWise - דף הבית">
+    <!-- GrantWise branding - no link -->
+    <div class="brand">
 
-        <!-- Half brain, half laboratory flask -->
         <span class="brand-icon" aria-hidden="true">
+
+            <!-- Half brain + half laboratory flask -->
             <svg viewBox="0 0 64 64"
+                 width="48"
+                 height="48"
                  fill="none"
                  xmlns="http://www.w3.org/2000/svg">
 
                 <!-- Brain half -->
-                <g stroke="#EAF6FF"
-                   stroke-width="2.8"
+                <g stroke="#FFFFFF"
+                   stroke-width="3"
                    stroke-linecap="round"
                    stroke-linejoin="round">
 
-                    <path d="M31 12
-                             C26 7 18 9 17 16
-                             C10 16 7 23 11 29
-                             C5 35 9 43 15 44
-                             C14 52 23 56 31 51
-                             V12Z"/>
+                    <path d="
+                        M31 12
+                        C26 7 18 9 17 16
+                        C10 16 7 23 11 29
+                        C5 35 9 43 15 44
+                        C14 52 23 56 31 51
+                        V12Z
+                    "/>
 
                     <path d="M23 17C18 20 21 25 25 26"/>
                     <path d="M16 30C23 28 25 33 23 38"/>
@@ -972,25 +1096,33 @@ dialog .actions {
                 </g>
 
                 <!-- Flask half -->
-                <g stroke="#46DCE4"
-                   stroke-width="2.8"
+                <g stroke="#45DFE5"
+                   stroke-width="3"
                    stroke-linecap="round"
                    stroke-linejoin="round">
 
                     <path d="M36 9H52"/>
 
-                    <path d="M40 9V28L33 47
-                             C31 52 34 56 40 56H55
-                             C61 56 63 52 60 47
-                             L50 28V9"/>
+                    <path d="
+                        M40 9V28
+                        L33 47
+                        C31 52 34 56 40 56
+                        H55
+                        C61 56 63 52 60 47
+                        L50 28V9
+                    "/>
 
                     <path d="M38 42H55"/>
                     <path d="M43 47L46 49"/>
 
-                    <circle cx="50" cy="47" r="1.8"
-                            fill="#46DCE4" stroke="none"/>
+                    <circle cx="50"
+                            cy="47"
+                            r="1.8"
+                            fill="#45DFE5"
+                            stroke="none"/>
                 </g>
             </svg>
+
         </span>
 
         <span class="brand-words">
@@ -999,53 +1131,78 @@ dialog .actions {
                 ניהול חכם של מענקי מחקר
             </span>
         </span>
-    </a>
+
+    </div>
 
     {% if user.is_authenticated %}
 
-    <nav aria-label="ניווט ראשי">
-        {% with u=request.resolver_match.url_name %}
+    
+<nav aria-label="ניווט ראשי">
+    {% with u=request.resolver_match.url_name %}
 
-        <a href="{% url 'orders' %}"
-           class="{% if u == 'orders' or u == 'home' %}on{% endif %}">
-            הזמנות חומרים
-        </a>
+    <a href="{% url 'resolve' %}"
+       class="{% if u == 'resolve' %}on{% endif %}">
+        המלצות
+    </a>
 
-        <a href="{% url 'other' %}"
-           class="{% if u == 'other' %}on{% endif %}">
-            אחר
-        </a>
+    <a href="{% url 'grants' %}"
+       class="{% if u == 'grants' %}on{% endif %}">
+        מענקים
+    </a>
 
-        <a href="{% url 'grants' %}"
-           class="{% if u == 'grants' %}on{% endif %}">
-            מענקים
-        </a>
+    <a href="{% url 'orders' %}"
+       class="{% if u == 'orders' or u == 'home' %}on{% endif %}">
+        הזמנות חומרים
+    </a>
 
-        <a href="{% url 'resolve' %}"
-           class="{% if u == 'resolve' %}on{% endif %}">
-            המלצות
-        </a>
+    <a href="{% url 'other' %}"
+       class="{% if u == 'other' %}on{% endif %}">
+        אחר
+    </a>
 
-        <a href="{% url 'settings' %}"
-           class="{% if u == 'settings' %}on{% endif %}">
-            הגדרות
-        </a>
+    {% endwith %}
+</nav>
 
-        {% endwith %}
-    </nav>
 
-    <div class="account">
-        <span class="account-avatar">
-            {{ user.get_username|first|upper }}
-        </span>
+<div class="account">
 
-        <span>{{ user.get_username }}</span>
+    <!-- Settings icon -->
+    <a href="{% url 'settings' %}"
+       class="account-settings"
+       title="הגדרות"
+       aria-label="הגדרות">
 
-        <form method="post" action="{% url 'logout' %}">
-            {% csrf_token %}
-            <button type="submit">יציאה</button>
-        </form>
-    </div>
+        <svg xmlns="http://www.w3.org/2000/svg"
+             width="22"
+             height="22"
+             viewBox="0 0 24 24"
+             fill="none"
+             stroke="currentColor"
+             stroke-width="1.8"
+             stroke-linecap="round"
+             stroke-linejoin="round">
+
+            <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/>
+
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.8 2.8-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.06 1.57V21h-4v-.09a1.7 1.7 0 0 0-1.06-1.57 1.7 1.7 0 0 0-1.88.34l-.06.06-2.8-2.8.06-.06A1.7 1.7 0 0 0 4.6 15 1.7 1.7 0 0 0 3.03 14H3v-4h.03A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88L4.2 7.06l2.8-2.8.06.06A1.7 1.7 0 0 0 8.94 4 1.7 1.7 0 0 0 10 2.43V2h4v.43A1.7 1.7 0 0 0 15.06 4a1.7 1.7 0 0 0 1.88.34l.06-.06 2.8 2.8-.06.06A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 20.97 10H21v4h-.03A1.7 1.7 0 0 0 19.4 15Z"/>
+
+        </svg>
+
+    </a>
+
+    <span class="account-avatar">
+        {{ user.get_username|first|upper }}
+    </span>
+
+    <span>{{ user.get_username }}</span>
+
+    <form method="post" action="{% url 'logout' %}">
+        {% csrf_token %}
+        <button type="submit">יציאה</button>
+    </form>
+
+</div>
+
 
     {% endif %}
 
