@@ -51,20 +51,21 @@
 <h2>בקשות <span class="muted" style="font-weight:400">— מסמנים מה לאשר. ההסבר, הסיבה וההשוואה בהרחבה (▸) בכל שורה</span></h2>
 
 <form method="post" action="{% url 'resolve_ai' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}" id="ai-form" class="card ai-panel" autocomplete="off">{% csrf_token %}
-  <label for="ai-text"><b>✨ הוראה בטקסט חופשי</b> <span class="muted">— ה-AI משנה רק את ההצעה שבדף, לא את הנתונים. אין שינוי עד "אישור".</span></label>
+  <label for="ai-text"><b>✨ הוראה בטקסט חופשי</b> <span class="muted">— ה-AI משנה רק את ההצעה שבדף, לא את הנתונים. אין שינוי עד "אישור". ההצעה מחושבת רק לבקשות המסומנות בטבלה.</span></label>
   <div class="ai-row" style="margin-top:6px">
     <input class="f" id="ai-text" name="instruction" maxlength="{{ ai_max }}" {% if not ai_ready %}disabled{% endif %}
            placeholder="למשל: אני לא רוצה להשתמש במענק של הרשות הלאומית, אני רוצה לשמור אותו להמשך">
     <button class="btn" id="ai-btn" {% if not ai_ready %}disabled{% endif %}>העזר ב-AI</button>
   </div>
   {% if not ai_ready %}<div class="reason" style="margin-top:6px">ה-AI לא מוגדר בסביבה הזו: חסרים המשתנים AWS_BEARER_TOKEN_BEDROCK ו-AWS_REGION.</div>{% endif %}
-  {% if ai_chips %}
+  {% if ai_chips or n_user_skipped %}
   <div class="ai-chips">
     <span class="muted">פועל עכשיו:</span>
     {% for i, text in ai_chips %}<span class="ai-chip">{{ text }}<button name="remove" value="{{ i }}" title="ביטול ההוראה" aria-label="ביטול ההוראה" formnovalidate>✕</button></span>{% endfor %}
-    <button name="clear" value="1" class="btn small ghost" formnovalidate>אפס הכול</button>
+    {% if n_user_skipped %}<span class="ai-chip">{{ n_user_skipped }} בקשות מחוץ לחישוב (הוסרו מהבחירה)<button name="unskip" value="1" title="להחזיר את כולן לחישוב" aria-label="להחזיר את כולן לחישוב" formnovalidate>✕</button></span>{% endif %}
+    {% if ai_chips %}<button name="clear" value="1" class="btn small ghost" formnovalidate>אפס הכול</button>{% endif %}
   </div>
-  {% if ai_summary %}<div class="reason" style="margin-top:6px">מה הבנתי: {{ ai_summary }}</div>{% endif %}
+  {% if ai_summary and ai_chips %}<div class="reason" style="margin-top:6px">מה הבנתי: {{ ai_summary }}</div>{% endif %}
   {% endif %}
   {% if result.notes %}<ul class="msgs" style="margin-top:8px">{% for n in result.notes %}<li class="error">{{ n }}</li>{% endfor %}</ul>{% endif %}
 </form>
@@ -80,7 +81,7 @@
   <tbody>
   {% for r in rows %}
   <tr data-pk="{{ r.order.id }}" data-state="{{ r.state }}" class="plan-row">
-    <td class="chk">{% if r.state == "ok" %}<input type="checkbox" class="pick" name="order" value="{{ r.order.id }}" checked aria-label="אישור: {{ r.order.item_name|truncatechars:40 }}">
+    <td class="chk">{% if r.user_skipped %}<input type="checkbox" class="pick-skipped" data-id="{{ r.order.id }}" aria-label="להחזיר לחישוב: {{ r.order.item_name|truncatechars:40 }}" title="לסמן ולחשב מחדש כדי להחזיר לחישוב">{% endif %}{% if r.state == "ok" %}<input type="checkbox" class="pick" name="order" value="{{ r.order.id }}" checked aria-label="אישור: {{ r.order.item_name|truncatechars:40 }}">
       <input type="hidden" name="edited_{{ r.order.id }}" value="0" class="edited-flag">{% endif %}</td>
     <td class="ro" style="white-space:normal;min-width:220px"><b>{{ r.order.item_name|truncatechars:70 }}</b>
       <div class="reason">{{ r.order.supplier }} · {{ r.order.requested_by }} · {{ r.order.date_requested|date:"d/m/Y" }}</div></td>
@@ -141,7 +142,7 @@
 </table></div>
 <p class="toolbar">
   <button class="btn" id="approve-btn" form="approve-form">אישור המסומנות</button>
-  <button type="button" class="btn ghost" id="refresh-btn" title="מחזיר להמלצה המיטבית ומבטל שינויים">↻ רענון המלצה</button>
+  <button class="btn ghost" id="refresh-btn" form="ai-form" name="recalc" value="1" formnovalidate title="מחשב מחדש את ההמלצה רק לבקשות המסומנות, ומבטל שינויים ידניים במענקים">↻ חשב מחדש למסומנות</button>
   <span class="muted" id="approve-hint"></span>
 </p>
 
@@ -250,10 +251,15 @@
     if(e.target.matches('.pick')) recalc();
   });
   document.getElementById('ai-form')?.addEventListener('submit', e => {
+    const f = e.target;                              // the page's selection travels with every action of this form
+    f.querySelectorAll('input.sel-gen').forEach(x => x.remove());
+    const add = (name, value) => { const i = document.createElement('input'); i.type = 'hidden'; i.name = name; i.value = value; i.className = 'sel-gen'; f.appendChild(i); };
+    add('selection', '1');
+    document.querySelectorAll('input.pick:not(:checked)').forEach(c => add('skip', c.value));
+    document.querySelectorAll('input.pick-skipped:not(:checked)').forEach(c => add('skip', c.dataset.id));
     const b = document.getElementById('ai-btn');
-    if(e.submitter === b && b){ b.disabled = true; b.textContent = 'חושב…'; setTimeout(() => { document.getElementById('ai-text').readOnly = true; }, 0); }
+    if(e.submitter === b && b && !b.disabled){ b.disabled = true; b.textContent = 'חושב…'; setTimeout(() => { document.getElementById('ai-text').readOnly = true; }, 0); }
   });
-  document.getElementById('refresh-btn')?.addEventListener('click', () => { location.href = location.pathname + location.search; });
   recalc();
 })();
 </script>

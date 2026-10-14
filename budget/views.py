@@ -226,9 +226,10 @@ def resolve_view(request):
     """Computes the recommendation on every visit — in memory only; nothing is saved until approval."""
     params = _resolve_params(request)
     constraints = request.session.get("ai_constraints", [])
+    skip = request.session.get("ai_skip", [])
     result, error = None, None
     try:
-        result = resolver.compute(constraints=constraints, **params)
+        result = resolver.compute(constraints=constraints, skip_orders=skip, **params)
     except (ValueError, MissingRate) as e:
         error = str(e)
 
@@ -273,7 +274,7 @@ def resolve_view(request):
                 a = order_amount(o)
                 rows.append(dict(order=o, state="skipped", lines=[], options=[], why_not=[], note=why,
                                  amt=a.gross if a else None, amt_cur=a.currency if a else "",
-                                 is_material=is_material(o)))
+                                 is_material=is_material(o), user_skipped=o.pk in result.user_skipped))
         for o in result.standing:
             a = order_amount(o)
             rows.append(dict(order=o, state="standing", lines=[], options=[], why_not=[],
@@ -296,6 +297,7 @@ def resolve_view(request):
         result=result, error=error, rows=rows, bin=_recycle_bin(), params=params, payload=payload,
         ai_ready=ai_assist.configured(), ai_chips=_ai_chips(constraints),
         ai_summary=request.session.get("ai_summary", ""), ai_max=ai_assist.MAX_INSTRUCTION_CHARS,
+        n_user_skipped=len(result.user_skipped) if result else 0,
         n_ready=count("ok", "unfunded"), n_noamount=count("noamount"),
         n_unfunded=count("unfunded"), n_skipped=count("skipped"), n_standing=count("standing")))
 
@@ -307,7 +309,8 @@ def _ai_chips(constraints):
     grant_names = {g.number: (g.sponsor or g.description or "")[:30] for g in Grant.objects.all()}
     ids = [c["order"] for c in constraints if c.get("order") is not None]
     order_names = {o.pk: o.item_name[:30] for o in OrderRequest.objects.filter(pk__in=ids)}
-    return [(i, ai_assist.describe(c, grant_names, order_names)) for i, c in enumerate(constraints)]
+    category_names = dict(BudgetCategory.objects.values_list("code", "name_he"))
+    return [(i, ai_assist.describe(c, grant_names, order_names, category_names)) for i, c in enumerate(constraints)]
 
 
 @login_required
@@ -317,6 +320,25 @@ def resolve_ai(request):
     The model returns a closed set of constraints — it never picks amounts or writes anything."""
     session = request.session
     back = reverse("resolve") + ("?" + request.GET.urlencode() if request.GET else "")
+    if request.POST.get("unskip"):
+        session.pop("ai_skip", None)
+        messages.info(request, "כל הבקשות חזרו לחישוב.")
+        return redirect(back)
+    if request.POST.get("selection") == "1":
+        # The requests the user unticked on the page stay out of every calculation until ticked again.
+        skip = []
+        for v in request.POST.getlist("skip"):
+            try:
+                skip.append(int(v))
+            except ValueError:
+                pass
+        session["ai_skip"] = skip
+        if not skip:
+            session.pop("ai_skip", None)
+    if request.POST.get("recalc"):
+        n = len(session.get("ai_skip", []))
+        messages.success(request, "ההמלצה חושבה מחדש" + (f" ללא {n} בקשות שהוסרו מהבחירה." if n else " לכל הבקשות."))
+        return redirect(back)
     if request.POST.get("clear"):
         session.pop("ai_constraints", None)
         session.pop("ai_summary", None)
@@ -344,7 +366,8 @@ def resolve_ai(request):
         messages.error(request, f"הגעת למגבלה של {ai_assist.CALLS_PER_HOUR} בקשות AI בשעה. אפשר לנסות שוב מאוחר יותר.")
         return redirect(back)
     try:
-        result = resolver.compute(constraints=current, **_resolve_params(request))
+        result = resolver.compute(constraints=current, skip_orders=session.get("ai_skip", []),
+                                  **_resolve_params(request))
         ctx = ai_assist.build_context(result, current)
         reply = ai_assist.ask(text, ctx.text)
     except (ValueError, MissingRate) as e:
@@ -354,7 +377,7 @@ def resolve_ai(request):
         messages.error(request, str(e))
         return redirect(back)
 
-    new, dropped = ai_assist.validate(reply, ctx.grants, ctx.orders)
+    new, dropped = ai_assist.validate(reply, ctx.grants, ctx.orders, ctx.categories, ctx.sponsors)
     if new:
         session["ai_constraints"] = ai_assist.merge(current, new)
         summary = str(reply.get("summary_he") or "").strip()[:300]

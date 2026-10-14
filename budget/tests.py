@@ -1420,16 +1420,18 @@ class InstructionConstraintsTests(TestCase):
                 GrantLine.objects.create(batch=batch, grant=g, category_id=cat, balance=Decimal(bal))
             return g
 
-        self.soon = grant("A", "EUR", date(2026, 12, 31), "1000", {"MATERIAL": "1000"})
+        self.soon = grant("A", "EUR", date(2026, 12, 31), "1000", {"MATERIAL": "1000", "SALARY": "1000"},
+                          sponsor="Horizon")
         self.reserve = grant("R", "USD", date(2029, 12, 31), "100000", {"GENERAL": "100000"}, is_reserve=True)
-        self.later = grant("L", "ILS", date(2027, 9, 30), "50000", {"MATERIAL": "50000"})
+        self.later = grant("L", "ILS", date(2027, 9, 30), "50000", {"MATERIAL": "50000", "SALARY": "50000"},
+                           sponsor="Innovation Authority", vat_required=False)
         self.n = 0
 
-    def order(self, amount="1000"):
+    def order(self, amount="1000", category="MATERIAL"):
         self.n += 1
         return OrderRequest.objects.create(
             natural_key=f"k{self.n}", item_name=f"item {self.n}", status="approved", grant_label="General Budget",
-            amount_est=Decimal(amount), amount_currency="ILS", category_id="MATERIAL", amount_source="manual",
+            amount_est=Decimal(amount), amount_currency="ILS", category_id=category, amount_source="manual",
             date_requested=TODAY)
 
     def plan(self, result, order):
@@ -1491,6 +1493,53 @@ class InstructionConstraintsTests(TestCase):
             {"type": "exclude_grant", "grant": "A"}])
         self.assertEqual(len(r.notes), 3)                            # unknown grant, unknown request, pin vs exclude
         self.assertNotEqual(self.grant_of(r, o), "A")
+
+    def test_category_rules_use_grants_that_do_not_pay_vat_for_salary(self):
+        salary, material = self.order("1000", "SALARY"), self.order("1000", "MATERIAL")
+        base = resolve.compute(today=TODAY)
+        self.assertEqual(self.grant_of(base, salary), "A")           # the expiring grant, as usual
+        prefer = [{"type": "prefer_for_category", "category": "SALARY", "vat": "free", "strength": "strong"}]
+        r = resolve.compute(today=TODAY, constraints=prefer)
+        self.assertEqual(self.grant_of(r, salary), "L")              # L is the grant that does not pay VAT
+        self.assertEqual(self.grant_of(r, material), self.grant_of(base, material))   # other categories untouched
+        require = [{"type": "require_for_category", "category": "SALARY", "vat": "free"}]
+        r = resolve.compute(today=TODAY, constraints=require)
+        self.assertEqual(self.grant_of(r, salary), "L")
+        blocked = next(o for o in self.plan(r, salary).options if o.state.grant.number == "A")
+        self.assertTrue(blocked.blocked)
+        # a rule that no active grant can satisfy is reported and ignored (it would leave the category unfunded)
+        r = resolve.compute(today=TODAY, constraints=[
+            {"type": "require_for_category", "category": "SALARY", "sponsor": "Nobody"}])
+        self.assertEqual(len(r.notes), 1)
+        self.assertEqual(self.plan(r, salary).state, "ok")
+
+    def test_require_for_category_can_leave_a_request_unfunded_with_a_clear_reason(self):
+        salary = self.order("1000", "SALARY")
+        r = resolve.compute(today=TODAY, constraints=[              # the only VAT-free grant is excluded as well
+            {"type": "require_for_category", "category": "SALARY", "vat": "free"},
+            {"type": "exclude_grant", "grant": "L"}])
+        plan = self.plan(r, salary)
+        self.assertEqual(plan.state, "unfunded")
+        self.assertIn("הוחרגו או נחסמו", plan.lines[0].reason)
+
+    def test_currency_order_weak_or_strong_first(self):
+        o = self.order("1000")
+        weak = resolve.compute(today=TODAY, constraints=[{"type": "currency_order", "direction": "weak_first",
+                                                          "strength": "strong"}])
+        self.assertEqual(self.grant_of(weak, o), "L")                # ₪ is the least valuable currency here
+        strong = resolve.compute(today=TODAY, constraints=[{"type": "currency_order", "direction": "strong_first",
+                                                            "strength": "strong"}])
+        self.assertEqual(self.grant_of(strong, o), "A")              # € (3.44 ₪) beats $ (3.08 ₪)
+
+    def test_unticked_requests_are_left_out_and_use_no_balance(self):
+        o1, o2 = self.order("3000"), self.order("3000")              # only one of them fits A (≈ 1,000 €)
+        both = resolve.compute(today=TODAY)
+        self.assertEqual(sorted(self.grant_of(both, o) for o in (o1, o2)), ["A", "L"])
+        only = resolve.compute(today=TODAY, skip_orders=[o2.pk])
+        self.assertEqual([p.cand.order.pk for p in only.plans], [o1.pk])
+        self.assertEqual(self.grant_of(only, o1), "A")
+        self.assertEqual(only.user_skipped, {o2.pk})
+        self.assertIn(o2.pk, [o.pk for o, _ in only.skipped])
 
     def test_nothing_is_written(self):
         self.order()
@@ -1630,6 +1679,41 @@ class AiAssistTests(TestCase):
                                   {"type": "reserve_amount", "grant": "B", "keep": 50.0, "currency": "ILS"}])
         self.assertEqual(ai_assist.merge(merged, [{"type": "clear"}]), [])
 
+    def test_new_vocabulary_is_validated_and_sponsors_are_expanded(self):
+        from budget import ai_assist
+        grants = {"A": "EUR", "B": "EUR", "C": "USD"}
+        sponsors = {"horizon": ("Horizon", ["A", "B"]), "nih": ("NIH", ["C"])}
+        cats = {"SALARY": "שכר", "MATERIAL": "חומרים"}
+        valid, dropped = ai_assist.validate({"constraints": [
+            {"type": "exclude_grant", "sponsor": "Horizon"},                                  # → A and B
+            {"type": "prefer_for_category", "category": "SALARY", "vat": "free", "strength": "strong"},
+            {"type": "require_for_category", "category": "SALARY", "sponsor": "nih"},
+            {"type": "currency_order", "direction": "weak_first"},
+            {"type": "prefer_for_category", "category": "NOPE", "vat": "free"},               # unknown category
+            {"type": "prefer_for_category", "category": "SALARY"},                            # no selector
+            {"type": "currency_order", "direction": "sideways"},
+            {"type": "pin", "sponsor": "Horizon", "order": 1},                                # pin takes one grant
+        ]}, grants, {1}, cats, sponsors)
+        self.assertEqual(valid, [
+            {"type": "exclude_grant", "grant": "A"}, {"type": "exclude_grant", "grant": "B"},
+            {"type": "prefer_for_category", "category": "SALARY", "vat": "free", "strength": "strong"},
+            {"type": "require_for_category", "category": "SALARY", "sponsor": "NIH"},
+            {"type": "currency_order", "direction": "weak_first", "strength": "soft"}])
+        self.assertEqual(len(dropped), 4)
+        # a later rule on the same category/selector replaces the earlier one
+        merged = ai_assist.merge(valid, [{"type": "prefer_for_category", "category": "SALARY", "vat": "free",
+                                          "strength": "soft"},
+                                         {"type": "currency_order", "direction": "strong_first", "strength": "soft"}])
+        self.assertEqual(sum(c["type"] == "prefer_for_category" for c in merged), 1)
+        self.assertEqual([c for c in merged if c["type"] == "currency_order"],
+                         [{"type": "currency_order", "direction": "strong_first", "strength": "soft"}])
+
+    def test_prompt_knows_the_new_instructions_and_the_expiry_limitation(self):
+        from budget import ai_assist
+        for word in ("prefer_for_category", "require_for_category", "currency_order", "weak_first"):
+            self.assertIn(word, ai_assist.SYSTEM_PROMPT)
+        self.assertIn(ai_assist.EXPIRY_UNSUPPORTED, ai_assist.SYSTEM_PROMPT)
+
     def test_context_is_compact_and_lists_only_what_exists(self):
         from budget import ai_assist
         result = resolve.compute()
@@ -1638,6 +1722,8 @@ class AiAssistTests(TestCase):
         self.assertEqual(ctx.orders, {self.order.pk})
         self.assertIn("G|B|Israel Innovation Authority|", ctx.text)
         self.assertIn(f"R|{self.order.pk}|Pipettes|", ctx.text)
+        self.assertIn("C|SALARY|", ctx.text)                                  # categories the model may name
+        self.assertEqual(ctx.sponsors["horizon"], ("Horizon", ["A"]))
 
     # ---- the page
 
@@ -1663,6 +1749,40 @@ class AiAssistTests(TestCase):
             self.post("again")
         self.post(clear="1")
         self.assertNotIn("ai_constraints", self.client.session)
+
+    def test_unticked_requests_are_left_out_of_the_recalculation(self):
+        second = OrderRequest.objects.create(
+            natural_key="k2", item_name="Gloves", status="approved", amount_est=Decimal("50"),
+            amount_currency="EUR", category_id="MATERIAL", amount_source="manual", date_requested=timezone_today())
+        seen = {}
+
+        def fake_ask(text, ctx):
+            seen["ctx"] = ctx
+            return {"constraints": [], "summary_he": ""}
+
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", side_effect=fake_ask):
+            self.post("anything", selection="1", skip=str(second.pk))
+        self.assertNotIn(f"R|{second.pk}|", seen["ctx"])                      # the model is not shown it either
+        self.assertIn(f"R|{self.order.pk}|", seen["ctx"])
+        self.assertEqual(self.client.session["ai_skip"], [second.pk])
+        page = self.client.get("/resolve/")
+        self.assertEqual([r["order"].pk for r in page.context["rows"] if r["state"] == "ok"], [self.order.pk])
+        row = next(r for r in page.context["rows"] if r["order"].pk == second.pk)
+        self.assertTrue(row["user_skipped"])
+        self.assertContains(page, 'class="pick-skipped"')
+        self.assertContains(page, "מחוץ לחישוב")
+        # recalculating without the model, with the second request ticked again, brings it back
+        with mock.patch("budget.ai_assist.ask", side_effect=AssertionError("no model call expected")):
+            self.post(recalc="1", selection="1")
+        self.assertNotIn("ai_skip", self.client.session)
+        page = self.client.get("/resolve/")
+        self.assertEqual(sorted(r["order"].pk for r in page.context["rows"] if r["state"] == "ok"),
+                         sorted([self.order.pk, second.pk]))
+        # the chip's ✕ ("unskip") also restores them all
+        self.post(selection="1", skip=str(second.pk), recalc="1")
+        self.assertEqual(self.client.session["ai_skip"], [second.pk])
+        self.post(unskip="1")
+        self.assertNotIn("ai_skip", self.client.session)
 
     def test_clarifying_question_is_shown_and_changes_nothing(self):
         reply = {"constraints": [], "summary_he": "", "clarify": "איזה מענק הכוונה: A או B?"}
