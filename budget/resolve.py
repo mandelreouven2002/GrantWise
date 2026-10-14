@@ -337,8 +337,10 @@ def _matches(sel, s):
         return False
     if sel.get("sponsor") and str(sel["sponsor"]).strip().casefold() != (g.sponsor or "").strip().casefold():
         return False
-    if sel.get("currency") and str(sel["currency"]).upper() != g.currency:
-        return False
+    if sel.get("currency"):
+        want = str(sel["currency"]).upper()
+        if (want == "FOREIGN" and g.currency == "ILS") or (want != "FOREIGN" and want != g.currency):
+            return False
     return True
 
 
@@ -351,7 +353,7 @@ def _selector_text(sel):
     if sel.get("sponsor"):
         parts.append(f"של {sel['sponsor']}")
     if sel.get("currency"):
-        parts.append(f"ב-{sel['currency']}")
+        parts.append("במטבע זר" if str(sel["currency"]).upper() == "FOREIGN" else f"ב-{sel['currency']}")
     return " ".join(parts)
 
 
@@ -402,7 +404,8 @@ def directives(constraints, states, order_ids, today):
             if not cat or not sel:
                 continue
             if not any(_matches(sel, s) for s in states.values()):
-                d.notes.append(f"ההוראה על הסעיף {cat} לא הופעלה: אין מענק פעיל {_selector_text(sel)}.")
+                d.notes.append(f"ההוראה על {'כל הבקשות' if cat == 'ALL' else 'הסעיף ' + str(cat)} לא הופעלה: "
+                               f"אין מענק פעיל {_selector_text(sel)}.")
                 continue
             if t == "prefer_for_category":
                 d.cat_prefer.append((cat, sel, BONUS.get(c.get("strength"), PREFER_BONUS)))
@@ -638,13 +641,14 @@ def compute(today=None, sap_as_of=None, constraints=None, skip_orders=None, **ov
                 cst, urg = cost(c, s, p)
                 cst += AVOID_PENALTY * (num in d.avoid) - PREFER_BONUS * (num in d.prefer)
                 for cat, sel, bonus in d.cat_prefer:
-                    if c.category == cat and _matches(sel, s):
+                    if cat in (c.category, "ALL") and _matches(sel, s):
                         cst -= bonus
                 cst += d.currency_bonus * d.currency_pos.get(num, 0.0)
                 blocked = ("הוחרג לפי הוראתך" if num in d.exclude else
                            "נחסם לבקשה הזו לפי הוראתך" if num in d.forbid.get(c.order.pk, ()) else
                            "לא מתאים להוראתך לסעיף הזה"
-                           if any(c.category == cat and not _matches(sel, s) for cat, sel in d.cat_require) else "")
+                           if any(cat in (c.category, "ALL") and not _matches(sel, s)
+                                  for cat, sel in d.cat_require) else "")
                 opts.append(Option(state=s, cost=cst, urgency=urg, avail_cat=s.cat_cap(c.category), blocked=blocked))
             else:
                 why[num] = reason

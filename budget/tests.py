@@ -1243,8 +1243,8 @@ class GrantsTableAndRecommendationPageTests(TestCase):
                                     amount_currency="EUR", category_id="MATERIAL", date_requested=TODAY)
         page = self.client.get("/resolve/")
         html = page.content.decode()
-        self.assertLess(html.index('id="plans"'), html.index('id="summary"'))      # the summary is below the requests
-        self.assertLess(html.index('id="summary"'), html.index('id="approve-btn"'))
+        self.assertLess(html.index('id="plans"'), html.index('id="approve-btn"'))   # the approve button follows the requests
+        self.assertLess(html.index('id="approve-btn"'), html.index('id="summary"')) # …and the summary comes after it
         plans = html[html.index('id="plans"'):html.index('id="summary"')]
         self.assertNotIn('class="cell', plans)                                     # nothing to edit in the table
         self.assertNotIn("data-f=", plans)
@@ -1531,6 +1531,22 @@ class InstructionConstraintsTests(TestCase):
                                                             "strength": "strong"}])
         self.assertEqual(self.grant_of(strong, o), "A")              # € (3.44 ₪) beats $ (3.08 ₪)
 
+    def test_only_foreign_currency_for_every_request(self):
+        o = self.order("1000", "MATERIAL")
+        r = resolve.compute(today=TODAY, constraints=[
+            {"type": "require_for_category", "category": "ALL", "currency": "foreign"}])
+        self.assertIn(self.grant_of(r, o), {"A", "R"})               # the ₪ grant L is out; A is EUR, R is USD
+        blocked = next(x for x in self.plan(r, o).options if x.state.grant.number == "L")
+        self.assertTrue(blocked.blocked)
+        # and for a salary request too (the rule is not tied to one category)
+        sal = self.order("1000", "SALARY")
+        r = resolve.compute(today=TODAY, constraints=[
+            {"type": "require_for_category", "category": "ALL", "currency": "foreign"}])
+        self.assertIn(self.grant_of(r, sal), {"A", "R"})
+        # the same idea as an exclusion of the ₪ grants
+        r = resolve.compute(today=TODAY, constraints=[{"type": "exclude_grant", "grant": "L"}])
+        self.assertNotEqual(self.grant_of(r, o), "L")
+
     def test_unticked_requests_are_left_out_and_use_no_balance(self):
         o1, o2 = self.order("3000"), self.order("3000")              # only one of them fits A (≈ 1,000 €)
         both = resolve.compute(today=TODAY)
@@ -1592,9 +1608,10 @@ class AiAssistTests(TestCase):
         self.assertTrue(url.startswith("https://bedrock-runtime.eu-west-1.amazonaws.com/model/"))
         self.assertIn("global.anthropic.claude-haiku-5-5/converse", url)
         self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
-        self.assertEqual(body["inferenceConfig"], {"maxTokens": 600})              # no temperature
+        self.assertEqual(body["inferenceConfig"], {"maxTokens": 2048})             # thinking budget included
         self.assertNotIn("toolConfig", body)                                       # JSON is asked for in the prompt
-        self.assertEqual(body["additionalModelRequestFields"], {"thinking": {"type": "disabled"}})
+        self.assertNotIn("additionalModelRequestFields", body)                     # thinking is left on
+        self.assertEqual(post.call_args.kwargs["timeout"], (10, ai_assist.TIMEOUT_SECONDS))
         sent = body["messages"][0]["content"][0]["text"]
         self.assertLessEqual(len(sent.split("INSTRUCTION:\n")[1]), ai_assist.MAX_INSTRUCTION_CHARS)
         self.assertIn("exclude_grant", body["system"][0]["text"])
@@ -1708,9 +1725,66 @@ class AiAssistTests(TestCase):
         self.assertEqual([c for c in merged if c["type"] == "currency_order"],
                          [{"type": "currency_order", "direction": "strong_first", "strength": "soft"}])
 
+    def test_foreign_currency_and_selectors_are_expanded_into_grants(self):
+        from budget import ai_assist
+        grants = {"A": "EUR", "B": "ILS", "C": "USD"}
+        info = {"A": {"currency": "EUR", "sponsor": "horizon", "vat": True},
+                "B": {"currency": "ILS", "sponsor": "iia", "vat": False},
+                "C": {"currency": "USD", "sponsor": "nih", "vat": True}}
+        sponsors = {"horizon": ("Horizon", ["A"]), "iia": ("IIA", ["B"]), "nih": ("NIH", ["C"])}
+        valid, dropped = ai_assist.validate({"constraints": [
+            {"type": "require_for_category", "category": "ALL", "currency": "foreign"},   # "השתמש במטבע זר בלבד"
+            {"type": "exclude_grant", "currency": "ILS"},                                  # "בלי מענקים בשקלים"
+            {"type": "prefer_grant", "currency": "USD"},
+            {"type": "avoid_grant", "vat": "free"},                                        # the grants that do not pay VAT
+            {"type": "exclude_grant", "currency": "XXX"},                                  # no such currency
+            {"type": "exclude_grant", "currency": "ILS", "vat": "paid"},                   # no grant fits both
+        ]}, grants, set(), {"SALARY": "שכר"}, sponsors, info)
+        self.assertEqual(valid, [
+            {"type": "require_for_category", "category": "ALL", "currency": "foreign", },
+            {"type": "exclude_grant", "grant": "B"},
+            {"type": "prefer_grant", "grant": "C"},
+            {"type": "avoid_grant", "grant": "B"}])
+        self.assertEqual(len(dropped), 2)
+        self.assertEqual(ai_assist.describe(valid[0], {}, {}), "כל הבקשות: רק ממענקים במטבע זר")
+
+    def test_ignoring_and_returning_requests_only_ticks_and_unticks(self):
+        second = OrderRequest.objects.create(
+            natural_key="k2", item_name="Gloves", status="approved", amount_est=Decimal("50"),
+            amount_currency="EUR", category_id="MATERIAL", amount_source="manual", date_requested=timezone_today())
+        leave = {"constraints": [{"type": "skip_order", "order": second.pk}], "summary_he": "התעלמתי מהכפפות."}
+        back = {"constraints": [{"type": "include_order", "order": second.pk}], "summary_he": ""}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=leave):
+            page = self.post("תתעלם מהכפפות")
+        self.assertEqual(self.client.session["ai_skip"], [second.pk])
+        self.assertNotIn("ai_constraints", self.client.session)                 # no funding rule, no hidden constraint
+        self.assertEqual([r["order"].pk for r in page.context["rows"] if r["state"] == "ok"], [self.order.pk])
+        row = next(r for r in page.context["rows"] if r["order"].pk == second.pk)
+        self.assertTrue(row["user_skipped"])                                    # and its box is shown unticked
+        self.assertContains(page, "הוצאו מהחישוב")
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=back):
+            page = self.post("תחזיר את הכפפות")
+        self.assertNotIn("ai_skip", self.client.session)
+        self.assertEqual(sorted(r["order"].pk for r in page.context["rows"] if r["state"] == "ok"),
+                         sorted([self.order.pk, second.pk]))
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=leave):
+            self.post("again")
+        everything = {"constraints": [{"type": "include_all"}], "summary_he": ""}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=everything):
+            self.post("החזר הכול")
+        self.assertNotIn("ai_skip", self.client.session)
+
+    def test_instruction_that_changes_nothing_says_why(self):
+        reply = {"constraints": [{"type": "exclude_grant", "currency": "XXX"}], "summary_he": "x"}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=reply):
+            page = self.post("בלי מענקים ב-XXX")
+        self.assertContains(page, "לא הצלחתי להפוך")
+        self.assertContains(page, "מטבע לא מוכר")
+
     def test_prompt_knows_the_new_instructions_and_the_expiry_limitation(self):
         from budget import ai_assist
-        for word in ("prefer_for_category", "require_for_category", "currency_order", "weak_first"):
+        for word in ("prefer_for_category", "require_for_category", "currency_order", "weak_first",
+                     "skip_order", "include_order", "include_all", "foreign"):
             self.assertIn(word, ai_assist.SYSTEM_PROMPT)
         self.assertIn(ai_assist.EXPIRY_UNSUPPORTED, ai_assist.SYSTEM_PROMPT)
 
@@ -1762,8 +1836,8 @@ class AiAssistTests(TestCase):
 
         with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", side_effect=fake_ask):
             self.post("anything", selection="1", skip=str(second.pk))
-        self.assertNotIn(f"R|{second.pk}|", seen["ctx"])                      # the model is not shown it either
-        self.assertIn(f"R|{self.order.pk}|", seen["ctx"])
+        self.assertIn(f"R|{second.pk}|Gloves||MATERIAL|50|EUR|S", seen["ctx"])   # shown, flagged as left out
+        self.assertNotIn(f"R|{self.order.pk}|Pipettes||MATERIAL|100|EUR|S", seen["ctx"])
         self.assertEqual(self.client.session["ai_skip"], [second.pk])
         page = self.client.get("/resolve/")
         self.assertEqual([r["order"].pk for r in page.context["rows"] if r["state"] == "ok"], [self.order.pk])
