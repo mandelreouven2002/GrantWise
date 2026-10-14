@@ -1352,3 +1352,44 @@ class MaterialsAndOtherPagesTests(TestCase):
         self.assertEqual((o.category_id, o.amount_est), ("TRAVEL_EXT", Decimal("900")))
         self.assertIn(m.pk, self.rows("/orders/"))
         self.assertIn(o.pk, self.rows("/other/"))
+
+    # ---- the quote cells: just the number, a marker with a hover, and the currency in its own column
+
+    def quote_cells(self, order):
+        page = self.client.get("/orders/?year=all")
+        row = next(r for r in page.context["t"]["rows"] if r["pk"] == order.pk)
+        return page, {c["col"].field: c for c in row["cells"]}
+
+    def test_quote_cells_have_a_hover_marker_not_an_expansion(self):
+        page, cells = self.quote_cells(self.mat)                       # nothing extracted, nothing typed by hand
+        OrderRequest.objects.filter(pk=self.mat.pk).update(quoted_manually_corrected=False)
+        page, cells = self.quote_cells(self.mat)
+        self.assertEqual(cells["quoted_total_incl_vat"]["mark_text"], "טרם חולץ")
+        html = page.content.decode()
+        table = html[html.index("<table"):html.index("</table>")]
+        self.assertNotIn("<details", table)                              # nothing to expand
+        self.assertNotIn("מטבע לא ידוע", html)
+        # a manual edit, a failed lookup and a good extraction
+        OrderRequest.objects.filter(pk=self.mat.pk).update(quoted_manually_corrected=True)
+        self.assertEqual(self.quote_cells(self.mat)[1]["quoted_total_excl_vat"]["mark_text"], "נכתב ידנית")
+        OrderRequest.objects.filter(pk=self.mat.pk).update(
+            quoted_manually_corrected=False, extraction_status="missing", quoted_total_excl_vat=None)
+        cells = self.quote_cells(self.mat)[1]
+        self.assertEqual(cells["quoted_total_excl_vat"]["mark_text"], "לא נמצא בחילוץ")
+        self.assertEqual(cells["quoted_total_incl_vat"]["mark"], "")      # this one was found: no marker
+        OrderRequest.objects.filter(pk=self.mat.pk).update(extraction_status="success")
+        self.assertEqual(self.quote_cells(self.mat)[1]["quoted_total_incl_vat"]["mark"], "")
+
+    def test_currency_is_its_own_column_and_editable(self):
+        import json
+        page, cells = self.quote_cells(self.mat)
+        fields = [c.field for c in page.context["t"]["cols"]]
+        self.assertLess(fields.index("quoted_total_excl_vat"), fields.index("quoted_currency"))
+        self.assertEqual(cells["quoted_currency"]["value"], "ILS")
+        self.assertNotIn("currency", cells["quoted_total_incl_vat"])      # the number cells carry no currency text
+        TrackedCurrency.objects.get_or_create(code="EUR")
+        r = self.client.post(f"/api/orders/{self.mat.pk}/", json.dumps({"field": "quoted_currency", "value": "eur"}),
+                             content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(OrderRequest.objects.get(pk=self.mat.pk).quoted_currency, "EUR")
+        self.assertEqual(self.quote_cells(self.mat)[1]["quoted_currency"]["value"], "EUR")

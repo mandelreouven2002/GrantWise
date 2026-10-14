@@ -29,7 +29,8 @@ def _vat_rate():
     return Decimal(str(settings.RESOLVE_DEFAULTS["vat_rate"]))
 
 
-def _quote_currency(o):
+def quote_currency(o):
+    """The currency of a material's quote: typed, else what the extraction read, else "" (then the order's)."""
     if o.quoted_currency:
         return o.quoted_currency
     if o.quoted_manually_corrected:
@@ -48,7 +49,7 @@ def order_amount(o):
         return OrderAmount(o.amount_est, o.amount_currency or "ILS", Decimal("1"), False) if o.amount_est else None
     vat = _vat_rate()
     incl, excl = o.quoted_total_incl_vat, o.quoted_total_excl_vat
-    cur = _quote_currency(o) or o.amount_currency or "ILS"
+    cur = quote_currency(o) or o.amount_currency or "ILS"
     if incl:
         ratio = min(excl / incl, Decimal("1")) if excl else Decimal("1") / vat
         return OrderAmount(incl, cur, ratio, True)

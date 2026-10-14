@@ -58,7 +58,9 @@ class QuoteStorageTests(TestCase):
         response = self.client.get("/orders/?year=all")
         self.assertContains(response, 'placeholder="—"')
         self.assertContains(response, 'value="118"')
-        self.assertContains(response, '<span>ILS</span>')
+        self.assertContains(response, 'value="ILS" selected')           # the currency has its own column
+        self.assertNotContains(response, '<span>ILS</span>')
+        self.assertContains(response, "לא נמצא בחילוץ")                 # the missing "before VAT" total
 
     def test_two_columns_and_traceability_display(self):
         self.store()
@@ -192,5 +194,8 @@ class QuoteStorageTests(TestCase):
         self.assertEqual(self.order.extraction_status, "ambiguous")
         self.assertEqual(self.order.quoted_currency, "")
         response = self.client.get("/orders/?year=all")
-        self.assertContains(response, '<span>USD</span>')
-        self.assertContains(response, '<span>ILS</span>')
+        # no currency text inside the number cells: a marker with a hover, and the evidence of each amount
+        self.assertNotContains(response, '<span>USD</span>')
+        self.assertContains(response, "דורש בדיקה")
+        self.assertContains(response, "Total excluding VAT 100.00 USD")
+        self.assertContains(response, "Total payable 400.00 ILS")

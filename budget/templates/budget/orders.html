@@ -6,6 +6,13 @@
 {% endblock %}
 
 {% block content %}
+<style>
+  .qcell{white-space:nowrap}
+  .qmark{display:inline-block;min-width:14px;margin-inline-start:4px;text-align:center;font-size:12px;line-height:14px;
+         color:var(--muted);cursor:help;border-radius:7px}
+  .qmark.miss{color:var(--warn);font-weight:700}
+  .qmark.manual{color:var(--accent)}
+</style>
 
 <div class="titlebar">
     <h1>

@@ -101,12 +101,12 @@ TABLES = {t.key: t for t in [
           cols=[Col("date_requested", "תאריך", "date"), Col("item_name", "פריט", width="w-l", required=True),
                 Col("quoted_total_incl_vat", "סה״כ כולל מע״מ", "quote_money"),
                 Col("quoted_total_excl_vat", "סה״כ לפני מע״מ", "quote_money"),
+                Col("quoted_currency", "מטבע", "currency"),
                 Col("status", "סטטוס", "select", STATUSES), Col("project_text", "פרויקט", "suggest", width="w-m"),
                 Col("category", "סעיף", "category"),
                 Col("requested_by", "מבקש/ת", width="w-m"),
                 Col("supplier", "ספק", width="w-m"), Col("po_number", "הזמנת רכש"), Col("quantity", "כמות", "num"),
                 Col("quote_pdf", "הצעת מחיר", "calc"),
-                Col("quoted_currency", "מטבע הצעה", hidden=True),
                 Col("extraction_status", "מצב חילוץ", "ro", hidden=True),
                 Col("lab_notes", "הערות", width="w-l")]),
     # Everything that is not a material: one typed amount, VAT plays no role.
@@ -169,12 +169,29 @@ def cell(col, obj, extra=None):
         v = getattr(obj, f"{col.field}_id")
         return dict(col=col, value="" if v is None else str(v))
     v = getattr(obj, col.field)
+    if col.field == "quoted_currency":      # shows the currency the model really uses for this request
+        from .amounts import quote_currency
+        return dict(col=col, value=quote_currency(obj) or obj.amount_currency or "ILS")
     if col.kind == "quote_money":
         evidence = obj.extraction_evidence.get("values", {}).get(col.field, {})
-        currency = obj.quoted_currency or ("" if obj.quoted_manually_corrected else evidence.get("currency", ""))
-        return dict(col=col, value=fmt_num(v), currency=currency,
-                    status=obj.get_extraction_status_display(),
-                    evidence=evidence.get("text", ""), page=evidence.get("page", ""))
+        status = obj.extraction_status
+        # a small marker (its text on hover) instead of an expandable part: only when the number needs a word
+        if obj.quoted_manually_corrected:
+            mark, text = "manual", "נכתב ידנית"
+        elif not status:
+            mark, text = "none", "טרם חולץ"
+        elif v is None:
+            mark, text = "miss", "לא נמצא בחילוץ"
+        elif status == "ambiguous":
+            mark, text = "miss", "דורש בדיקה"
+        elif status == "failed":
+            mark, text = "miss", "החילוץ נכשל"
+        else:
+            mark, text = "", ""
+        tip = " · ".join(x for x in (text, f"עמוד {evidence['page']}" if evidence.get("page") else "",
+                                     evidence.get("text", "")) if x)
+        return dict(col=col, value=fmt_num(v), mark=mark, mark_text=text, tip=tip,
+                    mark_glyph={"manual": "✎", "none": "·", "miss": "!"}.get(mark, ""))
     if col.kind == "ro":
         disp = obj._get_FIELD_display(obj._meta.get_field(col.field)) if getattr(
             obj._meta.get_field(col.field), "choices", None) else v
