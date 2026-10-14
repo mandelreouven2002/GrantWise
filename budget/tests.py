@@ -1400,3 +1400,245 @@ class MaterialsAndOtherPagesTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(OrderRequest.objects.get(pk=self.mat.pk).quoted_currency, "EUR")
         self.assertEqual(self.quote_cells(self.mat)[1]["quoted_currency"]["value"], "EUR")
+
+
+# --------------------------------------------------------------------------- AI assist
+
+@override_settings(FX_AUTO_REFRESH=False)
+class InstructionConstraintsTests(TestCase):
+    """`compute(constraints=…)`: what the typed instructions do to the recommendation (no AI involved)."""
+
+    def setUp(self):
+        FxRate.objects.create(date=TODAY, currency="EUR", rate_to_ils=Decimal("3.4422"))
+        FxRate.objects.create(date=TODAY, currency="USD", rate_to_ils=Decimal("3.078"))
+        batch = ImportBatch.objects.create(source="sap_grants", file_name="t", as_of=TODAY)
+
+        def grant(num, ccy, end, total, lines, **kw):
+            g = Grant.objects.create(number=num, currency=ccy, end_date=end, balance_total=Decimal(total),
+                                     last_batch=batch, **kw)
+            for cat, bal in lines.items():
+                GrantLine.objects.create(batch=batch, grant=g, category_id=cat, balance=Decimal(bal))
+            return g
+
+        self.soon = grant("A", "EUR", date(2026, 12, 31), "1000", {"MATERIAL": "1000"})
+        self.reserve = grant("R", "USD", date(2029, 12, 31), "100000", {"GENERAL": "100000"}, is_reserve=True)
+        self.later = grant("L", "ILS", date(2027, 9, 30), "50000", {"MATERIAL": "50000"})
+        self.n = 0
+
+    def order(self, amount="1000"):
+        self.n += 1
+        return OrderRequest.objects.create(
+            natural_key=f"k{self.n}", item_name=f"item {self.n}", status="approved", grant_label="General Budget",
+            amount_est=Decimal(amount), amount_currency="ILS", category_id="MATERIAL", amount_source="manual",
+            date_requested=TODAY)
+
+    def plan(self, result, order):
+        return next(p for p in result.plans if p.cand.order.pk == order.pk)
+
+    def grant_of(self, result, order):
+        return self.plan(result, order).lines[0].grant.number
+
+    def test_baseline_small_request_goes_to_the_expiring_grant(self):
+        o = self.order()
+        self.assertEqual(self.grant_of(resolve.compute(today=TODAY), o), "A")
+
+    def test_exclude_grant_keeps_it_out_but_selectable_and_ranked_last(self):
+        o = self.order()
+        r = resolve.compute(today=TODAY, constraints=[{"type": "exclude_grant", "grant": "A"}])
+        self.assertNotEqual(self.grant_of(r, o), "A")
+        opts = self.plan(r, o).options
+        a = next(x for x in opts if x.state.grant.number == "A")
+        self.assertTrue(a.blocked)                                   # still offered in the page's select…
+        self.assertEqual(opts[-1].state.grant.number, "A")           # …but ranked after the usable ones
+        self.assertNotIn("הבא בתור: A", self.plan(r, o).lines[0].reason)
+
+    def test_avoid_grant_is_used_only_when_nothing_else_fits(self):
+        o = self.order()
+        r = resolve.compute(today=TODAY, constraints=[{"type": "avoid_grant", "grant": "A"}])
+        self.assertNotEqual(self.grant_of(r, o), "A")
+        # with every other grant banned for the category, A is still used — and the reason says so
+        GrantRule.objects.create(grant=self.reserve, category_id="MATERIAL", allowed=False)
+        GrantRule.objects.create(grant=self.later, category_id="MATERIAL", allowed=False)
+        r = resolve.compute(today=TODAY, constraints=[{"type": "avoid_grant", "grant": "A"}])
+        self.assertEqual(self.grant_of(r, o), "A")
+        self.assertIn("ביקשת להימנע מהמענק הזה", self.plan(r, o).lines[0].reason)
+
+    def test_reserve_amount_keeps_money_in_the_grant(self):
+        o = self.order()                                             # ≈ 300 EUR: fits A (1000 EUR) normally
+        self.assertEqual(self.grant_of(resolve.compute(today=TODAY), o), "A")
+        c = [{"type": "reserve_amount", "grant": "A", "keep": 900, "currency": "EUR"}]
+        r = resolve.compute(today=TODAY, constraints=c)
+        self.assertNotEqual(self.grant_of(r, o), "A")                # only 100 EUR may be used
+        self.assertEqual(r.held, {"A": Decimal("900.00")})
+        # the amount may be given in another currency: converted at today's rate
+        c = [{"type": "reserve_amount", "grant": "A", "keep": 3098.0, "currency": "ILS"}]   # ≈ 900 EUR
+        self.assertNotEqual(self.grant_of(resolve.compute(today=TODAY, constraints=c), o), "A")
+
+    def test_pin_and_forbid(self):
+        o = self.order()
+        r = resolve.compute(today=TODAY, constraints=[{"type": "pin", "order": o.pk, "grant": "R"}])
+        self.assertEqual(self.grant_of(r, o), "R")
+        self.assertIn("הוצמד למענק הזה לפי הוראתך", self.plan(r, o).lines[0].reason)
+        r = resolve.compute(today=TODAY, constraints=[{"type": "forbid", "order": o.pk, "grant": "A"}])
+        self.assertNotEqual(self.grant_of(r, o), "A")
+
+    def test_instructions_that_cannot_apply_are_reported_not_applied(self):
+        o = self.order()
+        r = resolve.compute(today=TODAY, constraints=[
+            {"type": "exclude_grant", "grant": "NOPE"},
+            {"type": "pin", "order": 999999, "grant": "A"},
+            {"type": "pin", "order": o.pk, "grant": "A"},
+            {"type": "exclude_grant", "grant": "A"}])
+        self.assertEqual(len(r.notes), 3)                            # unknown grant, unknown request, pin vs exclude
+        self.assertNotEqual(self.grant_of(r, o), "A")
+
+    def test_nothing_is_written(self):
+        self.order()
+        before = (Allocation.objects.count(), ResolveRun.objects.count())
+        resolve.compute(today=TODAY, constraints=[{"type": "exclude_grant", "grant": "A"}])
+        self.assertEqual((Allocation.objects.count(), ResolveRun.objects.count()), before)
+
+
+@override_settings(FX_AUTO_REFRESH=False)
+class AiAssistTests(TestCase):
+    """The model call, validation and the page flow. Bedrock is mocked; nothing here needs a key."""
+
+    ENV = {"AWS_BEARER_TOKEN_BEDROCK": "test-key", "AWS_REGION": "eu-west-1"}
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        User.objects.create_user("u", password="p")
+        self.client.login(username="u", password="p")
+        FxRate.objects.create(date=timezone_today(), currency="EUR", rate_to_ils=Decimal("3.4422"))
+        batch = ImportBatch.objects.create(source="sap_grants", file_name="t", as_of=timezone_today())
+        for num, sponsor in (("A", "Horizon"), ("B", "Israel Innovation Authority")):
+            g = Grant.objects.create(number=num, currency="EUR", end_date=date(2099, 6, 1), sponsor=sponsor,
+                                     description=f"{sponsor} grant", balance_total=Decimal("5000"), last_batch=batch)
+            GrantLine.objects.create(batch=batch, grant=g, category_id="MATERIAL", balance=Decimal("5000"))
+        self.order = OrderRequest.objects.create(
+            natural_key="k", item_name="Pipettes", status="approved", amount_est=Decimal("100"),
+            amount_currency="EUR", category_id="MATERIAL", amount_source="manual", date_requested=timezone_today())
+
+    # ---- the model call
+
+    def converse_reply(self, tool_input):
+        class R:
+            status_code = 200
+            def json(self_inner):
+                return {"output": {"message": {"content": [{"toolUse": {"name": "set_constraints", "input": tool_input}}]}},
+                        "usage": {"inputTokens": 1, "outputTokens": 1}}
+        return R()
+
+    def test_request_shape_limits_and_forced_tool(self):
+        from budget import ai_assist
+        with mock.patch.dict("os.environ", self.ENV), \
+                mock.patch("budget.ai_assist.requests.post", return_value=self.converse_reply({"constraints": []})) as post:
+            out = ai_assist.ask("x" * 1000, "CURRENT:\nnone")
+        self.assertEqual(out, {"constraints": []})
+        url = post.call_args.args[0]
+        body = post.call_args.kwargs["json"]
+        self.assertTrue(url.startswith("https://bedrock-runtime.eu-west-1.amazonaws.com/model/"))
+        self.assertIn("/converse", url)
+        self.assertEqual(post.call_args.kwargs["headers"], {"Authorization": "Bearer test-key"})
+        self.assertEqual(body["inferenceConfig"], {"maxTokens": 600, "temperature": 0})
+        self.assertEqual(body["toolConfig"]["toolChoice"], {"tool": {"name": "set_constraints"}})
+        sent = body["messages"][0]["content"][0]["text"]
+        self.assertLessEqual(len(sent.split("INSTRUCTION:\n")[1]), ai_assist.MAX_INSTRUCTION_CHARS)
+        self.assertIn("exclude_grant", body["system"][0]["text"])
+
+    def test_http_error_is_reported_with_the_message(self):
+        from budget import ai_assist
+        class R:
+            status_code = 400
+            text = ""
+            def json(self):
+                return {"message": "The provided model identifier is invalid."}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.requests.post", return_value=R()):
+            with self.assertRaises(ai_assist.AiError) as cm:
+                ai_assist.ask("hi", "ctx")
+        self.assertIn("400", str(cm.exception))
+        self.assertIn("model identifier", str(cm.exception))
+
+    def test_validation_drops_what_was_not_sent_and_merge_replaces_earlier_instructions(self):
+        from budget import ai_assist
+        valid, dropped = ai_assist.validate({"constraints": [
+            {"type": "exclude_grant", "grant": "A"},
+            {"type": "exclude_grant", "grant": "ZZZ"},                      # not a grant we sent
+            {"type": "pin", "order": 7, "grant": "A"},                       # not a request we sent
+            {"type": "reserve_amount", "grant": "B", "keep": -5},            # nonsense amount
+            {"type": "reserve_amount", "grant": "B", "keep": 100},           # currency defaults to the grant's
+            {"type": "format_disk"},
+        ]}, {"A": "EUR", "B": "ILS"}, {1, 2})
+        self.assertEqual(valid, [{"type": "exclude_grant", "grant": "A"},
+                                 {"type": "reserve_amount", "grant": "B", "keep": 100.0, "currency": "ILS"}])
+        self.assertEqual(len(dropped), 4)
+        merged = ai_assist.merge(valid, [{"type": "prefer_grant", "grant": "A"},
+                                         {"type": "reserve_amount", "grant": "B", "keep": 50.0, "currency": "ILS"}])
+        self.assertEqual(merged, [{"type": "prefer_grant", "grant": "A"},
+                                  {"type": "reserve_amount", "grant": "B", "keep": 50.0, "currency": "ILS"}])
+        self.assertEqual(ai_assist.merge(merged, [{"type": "clear"}]), [])
+
+    def test_context_is_compact_and_lists_only_what_exists(self):
+        from budget import ai_assist
+        result = resolve.compute()
+        ctx = ai_assist.build_context(result, [])
+        self.assertEqual(ctx.grants, {"A": "EUR", "B": "EUR"})
+        self.assertEqual(ctx.orders, {self.order.pk})
+        self.assertIn("G|B|Israel Innovation Authority|", ctx.text)
+        self.assertIn(f"R|{self.order.pk}|Pipettes|", ctx.text)
+
+    # ---- the page
+
+    def post(self, text="", **extra):
+        return self.client.post("/resolve/ai/", {"instruction": text, **extra}, follow=True)
+
+    def test_instruction_changes_the_page_and_nothing_in_the_database(self):
+        before = (Allocation.objects.count(), Grant.objects.get(pk="B").balance_total)
+        reply = {"constraints": [{"type": "exclude_grant", "grant": "B"}], "summary_he": "לא אשתמש ברשות החדשנות."}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=reply):
+            page = self.post("בלי הרשות לחדשנות")
+        self.assertContains(page, "לא להשתמש במענק B · Israel Innovation Authority")      # the chip
+        self.assertContains(page, "לא אשתמש ברשות החדשנות.")
+        self.assertEqual(self.client.session["ai_constraints"], [{"type": "exclude_grant", "grant": "B"}])
+        row = page.context["rows"][0]
+        self.assertEqual(row["lines"][0].grant.number, "A")
+        self.assertTrue(next(o for o in row["options"] if o["num"] == "B")["blocked"])
+        self.assertEqual((Allocation.objects.count(), Grant.objects.get(pk="B").balance_total), before)
+        # the chip's ✕ removes it, and "אפס הכול" clears everything
+        page = self.post(remove="0")
+        self.assertEqual(self.client.session["ai_constraints"], [])
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=reply):
+            self.post("again")
+        self.post(clear="1")
+        self.assertNotIn("ai_constraints", self.client.session)
+
+    def test_clarifying_question_is_shown_and_changes_nothing(self):
+        reply = {"constraints": [], "summary_he": "", "clarify": "איזה מענק הכוונה: A או B?"}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=reply):
+            page = self.post("בלי המענק האירופי")
+        self.assertContains(page, "איזה מענק הכוונה: A או B?")
+        self.assertNotIn("ai_constraints", self.client.session)
+
+    def test_unknown_ids_from_the_model_are_ignored(self):
+        reply = {"constraints": [{"type": "exclude_grant", "grant": "HALLUCINATED"}], "summary_he": "x"}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=reply):
+            self.post("whatever")
+        self.assertNotIn("ai_constraints", self.client.session)
+
+    def test_not_configured_disables_the_box_and_the_post_explains(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            page = self.client.get("/resolve/")
+            self.assertContains(page, "AWS_BEARER_TOKEN_BEDROCK")
+            self.assertFalse(page.context["ai_ready"])
+            page = self.post("hi")
+        self.assertContains(page, "ה-AI לא מוגדר")
+
+    def test_rate_limit(self):
+        from budget import ai_assist
+        reply = {"constraints": [], "summary_he": ""}
+        with mock.patch.dict("os.environ", self.ENV), mock.patch("budget.ai_assist.ask", return_value=reply) as ask:
+            for _ in range(ai_assist.CALLS_PER_HOUR):
+                self.post("x")
+            page = self.post("one too many")
+        self.assertEqual(ask.call_count, ai_assist.CALLS_PER_HOUR)
+        self.assertContains(page, "מגבלה")

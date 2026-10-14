@@ -14,6 +14,7 @@ urlpatterns = [
 
     path("orders/<int:pk>/file/", views.order_file, name="order_file"),
 
+    path("resolve/ai/", views.resolve_ai, name="resolve_ai"),
     path("resolve/approve/", views.resolve_approve, name="resolve_approve"),
     path("resolve/recycle/<int:pk>/", views.allocation_recycle, name="allocation_recycle"),
     path("resolve/lab-updated/<int:pk>/", views.allocation_lab_updated, name="allocation_lab_updated"),
