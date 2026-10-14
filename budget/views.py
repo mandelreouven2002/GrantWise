@@ -380,21 +380,47 @@ def resolve_ai(request):
         messages.error(request, str(e))
         return redirect(back)
 
-    new, dropped = ai_assist.validate(reply, ctx.grants, ctx.orders, ctx.categories, ctx.sponsors)
+    new, dropped = ai_assist.validate(reply, ctx.grants, ctx.orders, ctx.categories, ctx.sponsors, ctx.grant_info)
+    # Ignoring / bringing back requests is a change of the page's selection (the ticks), not a funding rule.
+    ops = [c for c in new if c["type"] in ai_assist.SELECTION_TYPES]
+    new = [c for c in new if c["type"] not in ai_assist.SELECTION_TYPES]
+    if ops:
+        skip = set(session.get("ai_skip", []))
+        n_out = n_in = 0
+        for c in ops:
+            if c["type"] == "skip_order":
+                n_out += c["order"] not in skip
+                skip.add(c["order"])
+            elif c["type"] == "include_order":
+                n_in += c["order"] in skip
+                skip.discard(c["order"])
+            else:
+                n_in += len(skip)
+                skip.clear()
+        if skip:
+            session["ai_skip"] = sorted(skip)
+        else:
+            session.pop("ai_skip", None)
+        said = []
+        if n_out:
+            said.append(f"{n_out} בקשות הוצאו מהחישוב (הסימון שלהן הוסר)")
+        if n_in:
+            said.append(f"{n_in} בקשות הוחזרו לחישוב (סומנו)")
+        messages.success(request, "; ".join(said) + "." if said else "אין שינוי בבחירת הבקשות.")
     if new:
         session["ai_constraints"] = ai_assist.merge(current, new)
         summary = str(reply.get("summary_he") or "").strip()[:300]
         session["ai_summary"] = summary
         messages.success(request, "ההוראה הופעלה — ההמלצה חושבה מחדש (לא נשמר דבר במסד הנתונים)."
                                   + (f" {summary}" if summary else ""))
-    elif not (reply.get("clarify") or reply.get("unsupported")):
+    elif not (ops or reply.get("clarify") or reply.get("unsupported")):
         messages.warning(request, "לא הצלחתי להפוך את ההוראה לשינוי בהמלצה. אפשר לנסח אותה מחדש, "
                                   "עם שם המענק או הבקשה.")
     if reply.get("clarify"):
         messages.info(request, str(reply["clarify"])[:300])
     if reply.get("unsupported"):
         messages.warning(request, str(reply["unsupported"])[:300])
-    if dropped and new:
+    if dropped:
         messages.warning(request, f"חלק מההוראה לא הופעל ({len(dropped)}): " + "; ".join(sorted(set(dropped))))
     return redirect(back)
 
