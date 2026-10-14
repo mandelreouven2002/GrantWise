@@ -3,6 +3,10 @@ __pycache__/
 db.sqlite3
 staticfiles/
 .env
+.env.*
+.venv/
+test-quotes/
+db.sqlite3-*
 # lab exports contain real financial data — never commit them
 data/
 *.xls
