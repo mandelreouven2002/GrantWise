@@ -78,6 +78,7 @@ class Candidate:
     material: bool = False
     vat_ratio: Decimal = Decimal("1")      # price before VAT / price (materials only)
     fixed_grant: str | None = None
+    pinned: bool = False               # fixed_grant comes from the user's instruction, not from a LabSuit label
     notes: list = field(default_factory=list)
 
 
@@ -106,6 +107,7 @@ class Option:
     urgency: float
     avail_cat: Decimal                 # before this plan, grant currency
     rank: int = 0
+    blocked: str = ""                  # the user's instruction keeps the optimiser away from it (still selectable)
 
 
 @dataclass
@@ -137,6 +139,8 @@ class Result:
     alerts: list
     solver: str
     stale_fx: list
+    notes: list = field(default_factory=list)      # instructions that could not be applied, and why
+    held: dict = field(default_factory=dict)       # grant number -> amount kept aside by instruction (grant currency)
 
 
 # --------------------------------------------------------------------------- availability
@@ -313,6 +317,68 @@ def eligible(c: Candidate, s: GrantState, today):
     return True, ""
 
 
+# --------------------------------------------------------------------------- user instructions
+
+AVOID_PENALTY = 3.0        # far above any normal cost (0.05–1.6) and far below BIG: used only when nothing else fits
+PREFER_BONUS = 0.5
+
+
+@dataclass
+class Directives:
+    """The user's instructions (typed text, turned into constraints by `ai_assist`), in the form `compute` uses.
+    They shape this one calculation only — nothing is written, and approval is unaffected."""
+    exclude: set = field(default_factory=set)      # grants the optimiser must not use
+    avoid: set = field(default_factory=set)        # grants used only when nothing else can fund the request
+    prefer: set = field(default_factory=set)
+    forbid: dict = field(default_factory=lambda: defaultdict(set))   # order id -> grants
+    pin: dict = field(default_factory=dict)        # order id -> grant
+    held: dict = field(default_factory=dict)       # grant -> amount kept unspent (grant currency)
+    notes: list = field(default_factory=list)
+
+
+def directives(constraints, states, order_ids, today):
+    d = Directives()
+    for c in constraints or []:
+        t = c.get("type")
+        num = str(c.get("grant") or "")
+        oid = c.get("order")
+        if t == "clear":
+            continue
+        if num and num not in states:
+            d.notes.append(f"ההוראה על המענק {num} לא הופעלה: המענק לא פעיל או שאין לו שער חליפין.")
+            continue
+        if t in ("forbid", "pin") and oid not in order_ids:
+            d.notes.append(f"ההוראה על הבקשה {oid} לא הופעלה: היא כבר לא פתוחה או שאין לה סכום.")
+            continue
+        if t == "exclude_grant":
+            d.exclude.add(num)
+        elif t == "avoid_grant":
+            d.avoid.add(num)
+        elif t == "prefer_grant":
+            d.prefer.add(num)
+        elif t == "forbid":
+            d.forbid[oid].add(num)
+        elif t == "pin":
+            d.pin[oid] = num
+        elif t == "reserve_amount":
+            try:
+                keep = Decimal(str(c.get("keep")))
+                cur = str(c.get("currency") or states[num].grant.currency).upper()
+                if cur == states[num].grant.currency:
+                    keep_g = keep
+                else:
+                    keep_g = keep * rate_to_ils(cur, today)[0] / states[num].rate
+            except Exception:  # noqa: BLE001 — unusable amount or no exchange rate
+                d.notes.append(f"ההוראה לשמור סכום במענק {num} לא הופעלה: סכום או מטבע לא תקינים.")
+                continue
+            d.held[num] = max(d.held.get(num, Decimal("0")), keep_g.quantize(Q))
+    for oid, num in list(d.pin.items()):
+        if num in d.exclude or num in d.forbid.get(oid, ()):
+            d.notes.append(f"הבקשה {oid} לא הוצמדה למענק {num}: הוא מוחרג בהוראה אחרת.")
+            del d.pin[oid]
+    return d
+
+
 def make_candidate(o, today):
     a = order_amount(o)
     rate, _ = rate_to_ils(a.currency, today)
@@ -414,7 +480,7 @@ def explain(c, s, avail_cat, urgency, amount_grant, cat_names=None, ranked=None,
 
     # 1. why — one sentence, the first rule that applies
     if c.fixed_grant == g.number:
-        why = "נשמר המענק שסומן ב-LabSuit."
+        why = "הוצמד למענק הזה לפי הוראתך." if c.pinned else "נשמר המענק שסומן ב-LabSuit."
     elif urgency >= 0.5 and s.days_left is not None and s.days_left >= 0:
         why = f"המענק מסתיים בעוד {s.days_left} ימים ויש בו עדיין {s.total:,.0f} {cur}, אז כדאי לנצל אותו לפני שיפוג."
     elif ranked is not None and not others:
@@ -474,8 +540,9 @@ def explain(c, s, avail_cat, urgency, amount_grant, cat_names=None, ranked=None,
 
 # --------------------------------------------------------------------------- compute (read-only)
 
-def compute(today=None, sap_as_of=None, **overrides):
-    """Recommend funding for all open requests. Pure: performs no database writes."""
+def compute(today=None, sap_as_of=None, constraints=None, **overrides):
+    """Recommend funding for all open requests. Pure: performs no database writes.
+    `constraints`: the user's instructions (see `Directives`) — they change this calculation only."""
     p = {**settings.RESOLVE_DEFAULTS, **{k: v for k, v in overrides.items() if v is not None}}
     today = today or timezone.localdate()
     sap_batch = ImportBatch.latest(ImportBatch.Source.SAP_GRANTS)
@@ -488,6 +555,10 @@ def compute(today=None, sap_as_of=None, **overrides):
     b = collect(today, sap_as_of, p)
     cands = b["candidates"]
     cat_names = dict(BudgetCategory.objects.values_list("code", "name_he"))
+    d = directives(constraints, states, {c.order.pk for c in cands}, today)
+    for c in cands:
+        if c.order.pk in d.pin:
+            c.fixed_grant, c.pinned = d.pin[c.order.pk], True
 
     # eligibility (a LabSuit label wins when the user asked to respect labels and it is eligible)
     options, why_not = {}, {}
@@ -497,16 +568,23 @@ def compute(today=None, sap_as_of=None, **overrides):
             ok, reason = eligible(c, s, today)
             if ok:
                 cst, urg = cost(c, s, p)
-                opts.append(Option(state=s, cost=cst, urgency=urg, avail_cat=s.cat_cap(c.category)))
+                cst += AVOID_PENALTY * (num in d.avoid) - PREFER_BONUS * (num in d.prefer)
+                blocked = ("הוחרג לפי הוראתך" if num in d.exclude else
+                           "נחסם לבקשה הזו לפי הוראתך" if num in d.forbid.get(c.order.pk, ()) else "")
+                opts.append(Option(state=s, cost=cst, urgency=urg, avail_cat=s.cat_cap(c.category), blocked=blocked))
             else:
                 why[num] = reason
-        opts.sort(key=lambda o: o.cost)
+        opts.sort(key=lambda o: (bool(o.blocked), o.cost))
         for r, o in enumerate(opts, 1):
             o.rank = r
         if c.fixed_grant:
-            fixed = [o for o in opts if o.state.grant.number == c.fixed_grant]
+            fixed = [o for o in opts if o.state.grant.number == c.fixed_grant and not o.blocked]
             if fixed:
                 opts = fixed + [o for o in opts if o not in fixed]
+            elif c.pinned:
+                d.notes.append(f"הבקשה \"{c.order.item_name[:40]}\" לא הוצמדה למענק {c.fixed_grant}: "
+                               f"{why.get(c.fixed_grant, 'לא כשיר')}.")
+                c.fixed_grant, c.pinned = None, False
             else:
                 c.notes.append(f"המענק שסומן ב-LabSuit ({c.fixed_grant}) אינו כשיר: {why.get(c.fixed_grant, 'לא פעיל')}")
                 c.fixed_grant = None
@@ -520,7 +598,9 @@ def compute(today=None, sap_as_of=None, **overrides):
     z = {i: pulp.LpVariable(f"z_{i}", cat="Binary") for i in A}
     u = {i: A[i] * z[i] for i in A}
     for i, c in enumerate(cands):
-        usable = options[i][:1] if c.fixed_grant else options[i]
+        usable = [o for o in options[i] if not o.blocked]
+        if c.fixed_grant:
+            usable = usable[:1]
         for o in usable:
             num = o.state.grant.number
             x[i, num] = A[i] * pulp.LpVariable(f"y_{i}_{num}", cat="Binary")
@@ -533,7 +613,7 @@ def compute(today=None, sap_as_of=None, **overrides):
         keys = [key for key in x if key[1] == num]
         if not keys:
             continue
-        prob += pulp.lpSum(x[key] * k[key] for key in keys) <= max(float(s.total), 0)
+        prob += pulp.lpSum(x[key] * k[key] for key in keys) <= max(float(s.total - d.held.get(num, 0)), 0)
         if not s.pooled:
             for cat in {cands[i].category for i, _ in keys}:
                 ck = [key for key in keys if cands[key[0]].category == cat]
@@ -552,11 +632,14 @@ def compute(today=None, sap_as_of=None, **overrides):
             v = (pulp.value(x[i, num]) or 0) if (i, num) in x else 0
             if v < 0.01:
                 continue
+            if num in d.avoid:
+                c.notes.append("ביקשת להימנע מהמענק הזה, אבל אין חלופה שמכסה את הבקשה.")
             ils = Decimal(str(v)).quantize(Q)
             amt_g = to_grant_ccy(ils, c, s, p)
             lines.append(Line(grant=s.grant, amount_orig=(ils / c.rate).quantize(Q), amount_ils=ils,
                               amount_grant=amt_g,
-                              reason=explain(c, s, o.avail_cat, o.urgency, amt_g, cat_names, ranked=options[i])))
+                              reason=explain(c, s, o.avail_cat, o.urgency, amt_g, cat_names,
+                                             ranked=[q for q in options[i] if not q.blocked])))
             used[num] += amt_g
         short = Decimal(str(pulp.value(u[i]) or 0)).quantize(Q) if cands else Decimal("0")
         if short >= Decimal("0.01"):
@@ -580,7 +663,7 @@ def compute(today=None, sap_as_of=None, **overrides):
 
     return Result(today=today, sap_batch=sap_batch, sap_as_of=sap_as_of, params=p, states=states,
                   plans=plans, needs_amount=b["needs_amount"], standing=b["standing"], skipped=b["skipped"],
-                  alerts=alerts, solver=solver, stale_fx=stale_rates(today))
+                  alerts=alerts, solver=solver, stale_fx=stale_rates(today), notes=d.notes, held=dict(d.held))
 
 
 # --------------------------------------------------------------------------- approve (writes)
