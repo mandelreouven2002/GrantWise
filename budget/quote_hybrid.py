@@ -197,8 +197,8 @@ class HybridEvaluation:
     diagnostic: dict | None = None
 
 
-def evaluate_pdf(pdf_bytes, fallback=None):
-    rules = extract_pdf(pdf_bytes)  # Existing first stage, unchanged.
+def evaluate_pdf(pdf_bytes, fallback=None, *, rules=None):
+    rules = extract_pdf(pdf_bytes) if rules is None else rules
     if rules.extraction_status not in ("missing", "ambiguous"):
         return HybridEvaluation(rules, rules, "not_needed")
     if fallback is None:

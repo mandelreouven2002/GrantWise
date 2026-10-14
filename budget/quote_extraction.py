@@ -4,7 +4,7 @@ PyMuPDF is imported only when reading a PDF. An optional fallback callable can
 accept (pdf_bytes, prompt) and return a mapping in the requested format.
 """
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import re
 from typing import Callable, Mapping
 
@@ -97,7 +97,7 @@ def validate_result(payload: Mapping) -> ExtractionResult:
 
 
 _TOTAL = re.compile(r"סהכ|\btotal\b|\bamount\s+due\b", re.I)
-_NON_FINAL = re.compile(r"\bsub\s*[-]?\s*total\b|\b(?:unit|line|item)\s+total\b|סהכ\s*(?:ביניים|לפריט|לשורה|פריטים)|לפני\s*הנחה|הנחה\s*לפני|before\s*discount", re.I)
+_NON_FINAL = re.compile(r"\bsub\s*[-]?\s*total\b|\b(?:unit|line|item)\s+total\b|סהכ\s*(?:ביניים|לפריט|לשורה|פריטים)|(?:ביניים|לפריט|לשורה|פריטים)\s*סהכ|לפני\s*הנחה|הנחה\s*לפני|before\s*discount", re.I)
 _EXCL = re.compile(r"לפני\s*מעמ|ללא\s*מעמ|לא\s*כולל\s*מעמ|excl(?:uding)?\.?\s*(?:vat|tax)|before\s*(?:vat|tax)", re.I)
 _INCL = re.compile(r"כולל\s*מעמ|לתשלום|incl(?:uding)?\.?\s*(?:vat|tax)|amount\s+due|total\s+payable", re.I)
 _NUMBER = re.compile(r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)")
@@ -126,7 +126,7 @@ def _normalize_label(text):
 def _vat_row(line):
     """Recognize a printed VAT summary row, including decimal percentages.
 
-    Only its position is used; its amount and percentage are never calculated.
+    This summary path uses its position only; no VAT rate is assumed.
     """
     return (bool(re.search(r'מעמ|\bVAT\b|מס\s*ערך\s*מוסף|מוסף\s*ערך\s*מס', line, re.I))
             and not _TOTAL.search(line) and bool(_NUMBER.search(line))
@@ -141,6 +141,117 @@ def _line_value(line, original, page):
     ):
         return None
     return (numbers[0].replace(',', ''), currencies[0], original, page)
+
+
+_BEFORE_DISCOUNT = re.compile(r'לפני\s*הנחה|הנחה\s*לפני|before\s*discount', re.I)
+_DISCOUNT = re.compile(r'הנחה|discount', re.I)
+_VAT = re.compile(r'מעמ|\bVAT\b|מס\s*ערך\s*מוסף|מוסף\s*ערך\s*מס', re.I)
+_ADJUSTMENT = re.compile(
+    r'משלוח|הובלה|עמלה|תוספת|חיוב|זיכוי|עיגול|התאמה|shipping|freight|handling|'
+    r'surcharge|\bfees?\b|\bcharges?\b|delivery|insurance|ביטוח|adjustment|rounding|credit', re.I)
+_PERCENT = re.compile(r'[-−]?\d+(?:\.\d+)?\s*%|%\s*[-−]?\d+(?:\.\d+)?')
+
+
+def _zero_discount_total(pages, inclusive):
+    """Accept a printed pre-discount amount only with a complete zero-discount proof.
+
+    Never derive an unprinted total or use a VAT rate. Unmarked currency is
+    inherited only inside a single nearby summary with an explicit payable
+    currency; all marked currencies in the supporting rows must agree.
+    """
+    normalized = [[(original, _normalize_label(original)) for original in text.splitlines()
+                   if original.strip()] for text in pages]
+    flattened = [line for lines in normalized for _, line in lines]
+    if any(_ADJUSTMENT.search(line) for line in flattened):
+        return None
+    # Conflicting/unreadable explicit totals must not be bypassed by fallback.
+    if any(_TOTAL.search(line) and _EXCL.search(line) and not _NON_FINAL.search(line)
+           for line in flattened):
+        return None
+    before_rows = [(page, index, original, line)
+                   for page, lines in enumerate(normalized, 1)
+                   for index, (original, line) in enumerate(lines)
+                   if _TOTAL.search(line) and _BEFORE_DISCOUNT.search(line)]
+    if len(before_rows) != 1:
+        return None
+    page, start, original, line = before_rows[0]
+    if '%' in line or _NON_FINAL.search(_BEFORE_DISCOUNT.sub('', line)):
+        return None
+    if any(_TOTAL.search(row) and _NUMBER.search(row) and not _NON_FINAL.search(row)
+           and not _INCL.search(row) for row in flattened):
+        return None
+    currency = inclusive.quoted_currency
+    if not currency:
+        return None
+
+    def amount(row):
+        stripped = _PERCENT.sub('', row)
+        numbers = _NUMBER.findall(stripped)
+        marked = {code for code, pattern in _CURRENCIES.items() if pattern.search(row)}
+        if (len(numbers) != 1 or (marked and marked != {currency})
+                or re.search(r'[-−]\s*\d', stripped)):
+            return None
+        return Decimal(numbers[0].replace(',', ''))
+
+    base = amount(line)
+    if base is None:
+        return None
+    lines = normalized[page - 1]
+    finals = [(i, text) for i, (text, row) in enumerate(lines)
+              if _TOTAL.search(row) and _INCL.search(row) and not _EXCL.search(row)
+              and not _NON_FINAL.search(row)]
+    if len(finals) != 1 or not 0 < finals[0][0] - start <= 8:
+        return None
+    end, _ = finals[0]
+    final_value = _line_value(lines[end][1], lines[end][0], page)
+    if (final_value is None or Decimal(final_value[0]) != inclusive.quoted_total_incl_vat
+            or final_value[1] != currency):
+        return None
+    discount_rows = [(i, text, row) for i, (text, row) in enumerate(lines)
+                     if _DISCOUNT.search(row) and not _BEFORE_DISCOUNT.search(row)]
+    if sum(bool(_DISCOUNT.search(row) and not _BEFORE_DISCOUNT.search(row))
+           for row in flattened) != len(discount_rows):
+        return None
+    vat_rows = [(i, text, row) for i, (text, row) in enumerate(lines)
+                if _VAT.search(row) and not _TOTAL.search(row) and _NUMBER.search(_PERCENT.sub('', row))]
+    all_vat_rows = sum(bool(_VAT.search(row) and not _TOTAL.search(row)
+                           and _NUMBER.search(_PERCENT.sub('', row))) for row in flattened)
+    if not discount_rows or len(vat_rows) != 1 or all_vat_rows != 1:
+        return None
+    vat_index, vat_text, vat_line = vat_rows[0]
+    if not start < vat_index < end:
+        return None
+    for index, _, row in discount_rows:
+        percentages = _PERCENT.findall(row)
+        remaining = _PERCENT.sub('', row)
+        # Inspect every printed number, including integer percentage forms.
+        numbers = re.findall(r'[-−]?\d+(?:[,.]\d+)*', remaining)
+        marked = {code for code, pattern in _CURRENCIES.items() if pattern.search(row)}
+        if (not start < index < vat_index or not (percentages or numbers)
+                or (marked and marked != {currency})):
+            return None
+        tokens = [re.sub(r'[%\s]', '', p) for p in percentages] + numbers
+        if any(Decimal(token.replace(',', '').replace('−', '-')) != 0 for token in tokens):
+            return None
+    allowed = {i for i, _, _ in discount_rows} | {vat_index}
+    if any(i not in allowed and (_NUMBER.search(row) or _TOTAL.search(row))
+           for i, (_, row) in enumerate(lines) if start < i < end):
+        return None
+    vat_amount = amount(vat_line)
+    if vat_amount is None:
+        return None
+    with localcontext() as context:
+        context.prec = max(len(value.as_tuple().digits) for value in
+                           (base, vat_amount, inclusive.quoted_total_incl_vat)) + 2
+        if base + vat_amount != inclusive.quoted_total_incl_vat:
+            return None
+    return {"text": original, "page": page, "currency": currency,
+            "method": "zero_discount_reconciled",
+            "checks": {"discount": [{"text": text, "page": page} for _, text, _ in discount_rows],
+                       "vat": {"text": vat_text, "page": page},
+                       "including_vat": inclusive.evidence[FIELDS[1]],
+                       "reconciliation": "printed_exclusive_plus_printed_vat_equals_printed_inclusive"},
+            "amount": base}
 
 
 def extract_text_pages(pages: list[str]) -> ExtractionResult:
@@ -231,7 +342,15 @@ def extract_text_pages(pages: list[str]) -> ExtractionResult:
             and not (summary_confirmed or after_discount_explicit)):
         ambiguous = True
     payload["extraction_status"] = "ambiguous" if ambiguous else "missing"
-    return validate_result(payload)
+    result = validate_result(payload)
+    if result.quoted_total_excl_vat is None and result.extraction_status == "missing":
+        support = _zero_discount_total(pages, result)
+        if support is not None:
+            payload[FIELDS[0]] = str(support.pop("amount"))
+            payload["amount_currencies"][FIELDS[0]] = support["currency"]
+            payload["evidence"][FIELDS[0]] = support
+            result = validate_result(payload)
+    return result
 
 
 def extract_pdf(pdf_bytes: bytes, fallback: Callable | None = None) -> ExtractionResult:

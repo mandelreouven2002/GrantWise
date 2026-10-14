@@ -356,8 +356,69 @@ part of a number.
 
 Exact amount, page range, currency, final-total labels, and before-discount
 rejection remain mandatory. A reordered quote for workorder 19363's including-
-VAT total can pass, but the before-VAT total stays null. No amount is computed.
+VAT total can pass. The deterministic extractor now also accepts a printed
+before-discount total when the same summary explicitly proves zero discount,
+prints VAT separately and a final payable amount, and the printed amounts
+reconcile exactly with Decimal. It rejects additional charges, conflicts and
+currency disagreements. Explicit final excluding-VAT totals take priority.
+Evidence retains the source total and supporting discount/VAT/payable rows.
+No missing total is calculated from a VAT rate. With this rule the complete
+workorder quotation is resolved locally, so the hybrid pipeline needs no API.
 Local private-fixture tests use mocked model responses; no document is sent
 externally. Since the historical Claude quote was not retained in diagnostics,
 a real retry is optional for end-to-end confirmation, not required to test this
 normalization locally.
+
+## Phase 1: explicitly approved, stored Django order
+
+Normal imports and `extract_order_quotes` remain local-only. Bedrock is disabled
+unless `QUOTE_BEDROCK_ENABLED=1` AND the command supplies `--bedrock`, `--save`,
+one `--order-id`, and the exact stored PDF SHA-256. Credentials remain in the
+existing environment variables; never pass the key as a command-line argument.
+
+First inspect locally (no API, no database writes):
+
+```bash
+python manage.py extract_order_quotes --order-id 123
+```
+
+Read `pdf_sha256=...`, inspect the quotation, and explicitly approve sending
+that PDF. With the existing Bedrock credential/region/model environment
+configured, this command performs at most one network attempt and saves
+verified results to the existing order:
+
+```bash
+QUOTE_BEDROCK_ENABLED=1 python manage.py extract_order_quotes \
+  --order-id 123 --save --bedrock --approve-sha256 EXACT_HASH_FROM_PREVIEW \
+  --max-api-calls 1 --max-output-tokens 2048 --disable-thinking --effort low
+```
+
+The thinking/effort options above require a model supported by the existing
+adapter (Haiku 5.5). This is a real external call if local results are missing
+or ambiguous; successful/failed local results and manual corrections do not
+trigger fallback. A replacement PDF must receive its own approval.
+
+Attempts are stored inside `OrderRequest.extraction_evidence.bedrock_attempts`,
+keyed by PDF hash. A short transaction durably claims the attempt using row
+locking and a conditional update before any API call. The network runs outside
+transactions. A second transaction checks the PDF and manual corrections before
+saving. Failures leave local values intact; successful partial results retain
+their missing fields. Usage and fixed diagnostic codes are recorded, without
+credentials or response/reasoning contents. Verified quotation evidence is
+stored in the existing evidence field as intended.
+
+Every recorded attempt blocks future API calls for that order/hash, including
+timeouts, rejected responses, and interrupted `claimed` attempts. There is no
+automatic retry or force override. Investigate interrupted attempts manually;
+do not delete claims to retry blindly. No schema migration or background worker
+is needed. Run the command in a process with autocommit enabled, outside any
+enclosing database transaction. The durable ledger depends on retaining the
+existing evidence metadata; administration tools must not clear it.
+
+Mock-only integration tests (temporary database):
+
+```bash
+DATABASE_URL=sqlite:///:memory: FX_AUTO_REFRESH=0 .venv/bin/python -B manage.py test \
+  budget.test_quote_storage budget.test_quote_storage_bedrock \
+  budget.test_quote_extraction budget.test_quote_hybrid budget.test_quote_bedrock
+```

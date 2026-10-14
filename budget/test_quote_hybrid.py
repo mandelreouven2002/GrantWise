@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import pymupdf
 
 from budget.evaluate_quotes import main
-from budget.quote_extraction import ExtractionResult
+from budget.quote_extraction import ExtractionResult, extract_text_pages
 from budget.quote_hybrid import ClaudeFallback, evaluate_pdf, validate_claude, _evidence_on_page
 
 
@@ -67,7 +67,8 @@ class HybridTests(unittest.TestCase):
             response = payload(excl=None, incl='920.40')
             response['evidence']['quoted_total_incl_vat']['text'] = quote
             with self.subTest(quote=quote):
-                evaluation = evaluate_pdf(data, Mock(return_value=response))
+                evaluation = evaluate_pdf(data, Mock(return_value=response),
+                    rules=extract_text_pages(['סה״כ לתשלום 920.40 ₪']))
                 self.assertEqual(evaluation.fallback_outcome, 'evaluated')
                 self.assertEqual(evaluation.final.quoted_total_incl_vat, Decimal('920.40'))
                 self.assertIsNone(evaluation.final.quoted_total_excl_vat)
@@ -91,7 +92,8 @@ class HybridTests(unittest.TestCase):
         cases.append(before_discount)
         for response in cases:
             with self.subTest(response=response):
-                evaluation = evaluate_pdf(data, Mock(return_value=response))
+                evaluation = evaluate_pdf(data, Mock(return_value=response),
+                    rules=extract_text_pages(['סה״כ לתשלום 920.40 ₪']))
                 self.assertEqual(evaluation.fallback_outcome, 'rejected')
                 self.assertIsNone(evaluation.final.quoted_total_excl_vat)
                 self.assertEqual(evaluation.final.quoted_total_incl_vat, Decimal('920.40'))
