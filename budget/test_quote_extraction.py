@@ -139,11 +139,74 @@ class QuoteExtractionTests(unittest.TestCase):
                 self.assertEqual(result.quoted_total_incl_vat, Decimal('1288.04'))
                 self.assertEqual(result.quoted_currency, 'ILS')
 
-    def test_before_discount_is_not_final_even_with_zero_discount(self):
+    def test_before_discount_zero_is_final_with_complete_reconciliation(self):
         result = extract_text_pages(['סה״כ לפני הנחה 780.00 ₪\nהנחה 0.00 ₪\nמע״מ 140.40 ₪\nסה״כ לתשלום 920.40 ₪'])
-        self.assertIsNone(result.quoted_total_excl_vat)
+        self.assertEqual(result.quoted_total_excl_vat, Decimal('780.00'))
         self.assertEqual(result.quoted_total_incl_vat, Decimal('920.40'))
-        self.assertEqual(result.extraction_status, 'missing')
+        self.assertEqual(result.extraction_status, 'success')
+        support = result.evidence['quoted_total_excl_vat']
+        self.assertIn('לפני הנחה', support['text'])
+        self.assertEqual(support['method'], 'zero_discount_reconciled')
+        self.assertIn('140.40', support['checks']['vat']['text'])
+
+    def test_zero_discount_percentage_or_amount_and_nonstandard_vat(self):
+        for discount in ('Discount 0%', 'Discount % 0', 'Discount 0.00 ILS', 'Discount 0.00% 0.00 ILS'):
+            with self.subTest(discount=discount):
+                result = extract_text_pages([f'Total before discount 100.00 ILS\n{discount}\nVAT 7.25 ILS\nTotal payable 107.25 ILS'])
+                self.assertEqual(result.extraction_status, 'success')
+                self.assertEqual(result.quoted_total_excl_vat, Decimal('100.00'))
+
+    def test_explicit_exclusive_total_has_priority_over_before_discount(self):
+        result = extract_text_pages(['Total before discount 120.00 ILS\nDiscount 20.00 ILS\nTotal excluding VAT after discounts 100.00 ILS\nVAT 18.00 ILS\nTotal payable 118.00 ILS'])
+        self.assertEqual(result.extraction_status, 'success')
+        self.assertEqual(result.quoted_total_excl_vat, Decimal('100.00'))
+        self.assertNotIn('method', result.evidence['quoted_total_excl_vat'])
+
+    def test_zero_discount_fallback_rejects_insufficient_or_conflicting_support(self):
+        base = 'Total before discount 100.00 ILS\nDiscount 0% 0.00 ILS\nVAT 18.00 ILS\nTotal payable 118.00 ILS'
+        cases = {
+            'nonzero_discount': base.replace('Discount 0%', 'Discount 10%'),
+            'nonzero_amount': base.replace('0.00 ILS', '1.00 ILS'),
+            'missing_discount': base.replace('Discount 0% 0.00 ILS\n', ''),
+            'unknown_discount': base.replace('Discount 0% 0.00 ILS', 'Discount unspecified'),
+            'missing_vat': base.replace('VAT 18.00 ILS\n', ''),
+            'vat_percentage_only': base.replace('VAT 18.00 ILS', 'VAT 18%'),
+            'missing_payable': base.replace('Total payable 118.00 ILS', ''),
+            'mismatch': base.replace('VAT 18.00 ILS', 'VAT 17.99 ILS'),
+            'base_currency_conflict': base.replace('discount 100.00 ILS', 'discount 100.00 USD'),
+            'vat_currency_conflict': base.replace('VAT 18.00 ILS', 'VAT 18.00 USD'),
+            'discount_currency_conflict': base.replace('Discount 0% 0.00 ILS', 'Discount 0% 0.00 USD'),
+            'shipping_even_if_reconciled': base + '\nShipping 5.00 ILS',
+            'unknown_adjustment': base.replace('VAT 18.00', 'Adjustment 0.00 ILS\nVAT 18.00'),
+            'unlabelled_adjustment': base.replace('VAT 18.00', 'Other 0.00 ILS\nVAT 18.00'),
+            'conflicting_before_discount': base + '\nTotal before discount 99.00 ILS',
+            'other_generic_total': base + '\nTotal 99.00 ILS',
+            'conflicting_payable': base + '\nTotal payable 119.00 ILS',
+            'conflicting_vat': base.replace('VAT 18.00', 'VAT 2.00 ILS\nVAT 18.00'),
+            'negative_base': base.replace('100.00', '-100.00'),
+            'unit_total': base.replace('Total before discount', 'Unit total before discount'),
+            'subtotal': base.replace('Total before discount', 'Sub total before discount'),
+            'conflicting_explicit': base + '\nTotal excluding VAT 99.00 ILS\nTotal excluding VAT 98.00 ILS',
+        }
+        for name, text in cases.items():
+            with self.subTest(case=name):
+                result = extract_text_pages([text])
+                self.assertIsNone(result.quoted_total_excl_vat)
+                self.assertNotEqual(result.extraction_status, 'success')
+
+    def test_zero_discount_fallback_requires_same_page_summary(self):
+        result = extract_text_pages(['Total before discount 100.00 ILS\nDiscount 0%', 'VAT 18.00 ILS\nTotal payable 118.00 ILS'])
+        self.assertIsNone(result.quoted_total_excl_vat)
+        result = extract_text_pages(['Total before discount 100.00 ILS\nDiscount 0%\nVAT 18.00 ILS\nTotal payable 118.00 ILS', 'Discount 10%'])
+        self.assertIsNone(result.quoted_total_excl_vat)
+        result = extract_text_pages(['Total before discount 100.00 ILS\nDiscount 0%\nVAT 18.00 ILS\nTotal payable 118.00 ILS', 'VAT 19.00 ILS'])
+        self.assertIsNone(result.quoted_total_excl_vat)
+
+    def test_fragmented_rtl_zero_discount_summary_without_repeating_currency(self):
+        result = extract_text_pages(["2.00:פריטים כ''סה\n780.00 הנחה לפני כ''סה\n0.00 הנחה % 0\n140.40 מ''מע % 18\n920.40 ₪ לתשלום כ''סה"])
+        self.assertEqual(result.extraction_status, 'success')
+        self.assertEqual(result.quoted_total_excl_vat, Decimal('780.00'))
+        self.assertEqual(result.quoted_currency, 'ILS')
 
     def test_generic_grand_total_without_vat_context_is_not_payable(self):
         result = extract_text_pages(['סך הכול 1,288.04 ש״ח'])
@@ -166,7 +229,7 @@ class QuoteExtractionTests(unittest.TestCase):
         folder = Path(__file__).resolve().parent.parent / 'test-quotes'
         for name, excl, incl, status in (
             ('215990.pdf', Decimal('1091.56'), Decimal('1288.04'), 'success'),
-            ('workorder_19363.pdf', None, Decimal('920.40'), 'missing'),
+            ('workorder_19363.pdf', Decimal('780.00'), Decimal('920.40'), 'success'),
         ):
             with self.subTest(filename=name):
                 path = folder / name

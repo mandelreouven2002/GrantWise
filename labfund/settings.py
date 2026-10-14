@@ -96,6 +96,7 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = 20000
 
 # Exchange rates refresh themselves on page loads (see budget/fx.py)
 FX_AUTO_REFRESH = os.environ.get("FX_AUTO_REFRESH", "1") == "1"
+QUOTE_BEDROCK_ENABLED = os.environ.get("QUOTE_BEDROCK_ENABLED", "0") == "1"
 FX_REFRESH_MINUTES = int(os.environ.get("FX_REFRESH_MINUTES", "60"))
 
 # Resolve engine defaults (all overridable per run from the UI / CLI)

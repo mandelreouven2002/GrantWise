@@ -155,3 +155,270 @@ Mocked regression tests:
 python -B -m unittest budget.test_quote_extraction budget.test_quote_hybrid \
   budget.test_quote_bedrock -v
 ```
+
+## Safe failure diagnostics
+
+`diagnostic` is now included in the evaluation report. It contains a failure
+stage and fixed code, and where relevant a validation field, HTTP status,
+allowlisted AWS exception type, known stop reason, or JSON syntax line/column.
+Raw exception messages, HTTP bodies, headers, keys, PDF text, model output, and
+account-specific model/profile ARNs are never included in diagnostics. The
+normal extraction report still contains local quotation evidence; keep it private.
+
+Before retrying an API call, check the configuration without contacting AWS:
+
+```bash
+python -B -m budget.evaluate_quotes test-quotes --provider bedrock --check-config
+```
+
+This reports missing variable names or malformed configuration without printing
+their values. A valid local configuration does not verify model existence,
+regional support, API-key permissions, or expiry. `--check-config` cannot be
+combined with `--claude`.
+
+Examples: `response_json/model_output_not_json` (including a Markdown-fence
+flag), `response_envelope/response_not_complete` with `max_tokens`,
+`validation/evidence_not_on_page`, and
+`validation/non_final_or_unlabelled_evidence`. These distinctions are diagnostic
+only; extraction rules, JSON parsing, and evidence validation remain strict.
+
+An old generic rejected result cannot reveal its precise original cause. A new
+explicitly approved test is required if no original detailed diagnostic exists.
+
+## Low-cost Bedrock evaluation
+
+Every Converse request sets `inferenceConfig.maxTokens` explicitly. Its default
+is 1024, configurable with `BEDROCK_MAX_OUTPUT_TOKENS` or `--max-output-tokens`
+(CLI takes precedence). The local prototype allows 1–4096; the chosen model may
+have additional limits. Missing/ambiguous values and evidence remain mandatory.
+If the configured limit cuts off the response, it is rejected; no automatic retry runs.
+
+The adapter uses a fresh HTTP session with `HTTPAdapter(max_retries=0)` and no
+redirect following. There is no AWS SDK retry layer. `--max-api-calls 1` counts
+attempts, including unsuccessful ones, and prevents another request in the run.
+The Bedrock evaluation CLI now rejects `--max-api-calls` values other than 1.
+A timeout does not prove the service performed no inference; usage may be unknown.
+
+A compact prompt replaces duplicate schema/instruction text. Only the selected
+PDF is sent once. Original pages are retained because blindly taking the last
+page can omit discounts, charges, currency conditions or change evidence page
+numbers. The current workorder PDF is one page; no other PDFs/pages are included.
+
+`maxTokens` limits output only; Converse does not provide a separate input-token
+cap that truncates PDFs safely. Input cost depends on all PDF pages and the prompt.
+`api_usage` reports allowlisted integer `inputTokens`, `outputTokens`,
+`totalTokens`, and optional cache token counts from the response. Counts are
+reported even if the model output is subsequently rejected. Missing usage is
+null, not zero. No keys, document text or server response bodies are included
+in usage metadata. A token count is not a currency cost estimate.
+
+After reviewing configuration and explicitly approving the same PDF:
+
+```bash
+python -B -m budget.evaluate_quotes test-quotes --provider bedrock \
+  --filename workorder_19363.pdf --pretty --claude \
+  --approve-sha256 APPROVED_PDF_SHA256 --max-api-calls 1 --max-output-tokens 1024
+```
+
+## Converse content formats
+
+The response parser supports plain `text`, cited answer text under
+`citationsContent.content[].text`, and ordered mixtures of those blocks. Each
+ContentBlock is validated as a union with exactly one member. Document citations
+are metadata, not a substitute for the existing quotation evidence validation.
+
+Documented `reasoningContent.reasoningText` (with optional signature) and
+`reasoningContent.redactedContent` are explicitly validated as metadata. They
+are never used as JSON answers and never exposed in reports. Valid `cachePoint`
+metadata is also explicitly counted. `response_blocks` reports only known type
+names and counts. Reasoning/cache without answer text is rejected.
+
+Other known block types, such as `toolUse`, image, or audio, are rejected because
+this evaluation requests only a quotation JSON answer and executes no tools.
+Diagnostics include the block index and allowlisted type names. Unknown keys
+are represented by a count, never printed verbatim. Unknown types, malformed
+unions, and invalid reasoning/citation structures are not silently ignored.
+
+Sources:
+https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ContentBlock.html
+https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CitationsContentBlock.html
+https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ReasoningContentBlock.html
+
+The old `content_block_unsupported` result cannot reveal the actual block type.
+Reasoning was previously a legitimate but unsupported type; it is a plausible
+cause, not proof about the prior response. The next explicitly approved run
+will report accepted block counts or a precise safe block diagnostic.
+
+## Haiku truncation and thinking controls
+
+The request does not explicitly enable thinking. This does not establish that
+the selected model runs without it: defaults differ by model version. AWS
+documents adaptive thinking as enabled by default on Haiku 5.5; Haiku 4.5 uses
+explicit extended-thinking settings. Thinking tokens count toward the output
+limit and are billed as output. There is no guaranteed separation of reasoning
+tokens in the ordinary usage counters.
+
+Previously a `max_tokens` response was rejected before block counts were
+recorded. Now `response_blocks` records only known top-level type counts even
+on truncation. `{}` in an older report therefore does not prove absence of
+reasoning or answer blocks. Partial JSON remains rejected, even if it appears
+complete; no retry or automatic output-limit increase occurs.
+
+The prompt requests one compact object, short original supporting quotes,
+and no explanations, translation, citation prose or full-page transcription.
+The required keys, monetary semantics, and evidence validator are unchanged.
+
+For a verified Haiku 4.5 or 5.5 identifier, `--disable-thinking` sends:
+
+```json
+{"additionalModelRequestFields":{"thinking":{"type":"disabled"}}}
+```
+
+It is opt-in. Unknown model versions and opaque application profile ARNs are
+refused before any request; do not guess the model behind an ARN. No generic
+`effort`, `temperature`, or `budget_tokens` setting is applied to all Haiku
+versions. Haiku 5.5 supports effort controls, while older Haiku versions cannot
+be assumed to do so. Explicitly disabling thinking is the smaller experiment
+for this extraction task.
+
+First verify the exact model/profile target with the account owner, then run
+this local check (no network):
+
+```bash
+python -B -m budget.evaluate_quotes test-quotes --provider bedrock \
+  --check-config --disable-thinking --max-output-tokens 1024
+```
+
+After approval, keep the same 1024 limit and one attempt, adding
+`--disable-thinking` to the existing single-document evaluation command.
+If `max_tokens` occurs again, compare only safe block counts and token usage;
+do not print reasoning or raw model answers for diagnosis.
+
+Official references:
+https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html
+https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-extended-thinking.html
+https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
+
+## Haiku 5.5 low-effort experiment
+
+`--effort low` (or `BEDROCK_EFFORT=low`) sets
+`additionalModelRequestFields.output_config.effort`. The CLI overrides the
+environment. No effort is sent if neither is provided. This prototype enables
+effort only for recognizable Haiku 5.5 IDs; older Haiku and opaque profile ARNs
+are rejected locally. `low`, `medium`, and `high` can combine with disabled
+thinking. `xhigh`/`max` plus disabled thinking is refused before a request.
+
+The requested low-effort/disabled combination is documented by AWS, but does
+not prove absence of reasoning in a returned response. `requested_effort` and
+`thinking_policy` describe the requested settings, not confirmed server behavior.
+
+`response_lengths` reports counts, per-block lengths, and total lengths for
+plain text, cited generated text, and reasoning text, measured in Unicode
+characters. Redacted reasoning reports base64 string lengths separately. It
+never includes reasoning text, signatures, citation source text, keys, or raw
+model responses. Counts are retained even on `max_tokens` rejection. No response
+means null metrics. These are not token counts and cannot identify the exact
+billed reasoning-token share.
+
+With the existing key and region environment variables set, use:
+
+```bash
+export BEDROCK_MODEL_ID='global.anthropic.claude-haiku-5-5'
+python -B -m budget.evaluate_quotes test-quotes --provider bedrock \
+  --check-config --disable-thinking --effort low --max-output-tokens 1024
+```
+
+The configuration check has no network request or inference charge. After
+explicit document approval and checking that its hash has not changed:
+
+```bash
+python -B -m budget.evaluate_quotes test-quotes --provider bedrock \
+  --filename workorder_19363.pdf --pretty --claude \
+  --disable-thinking --effort low --max-output-tokens 1024 --max-api-calls 1 \
+  --approve-sha256 58883c90ef864139881d27973c2481f849eb5c5cd2422a569bd91ac5f64ca390
+```
+
+Examine `api_usage`, `response_blocks`, `response_lengths`, `diagnostic`, and
+the validated extraction result. No automatic retries or token-limit increases
+occur. No database reads/writes, migrations, or funding actions are performed.
+
+## Hebrew evidence grounding
+
+Evidence normalization applies Unicode NFKC, normalizes typographic quotes and
+removes presentation controls/whitespace while preserving numerical punctuation
+and monetary signs. If a literal normalized quote does not match, a Hebrew quote
+with exactly one number may match the complete token multiset of a contiguous
+1–3-line window on its cited page. This handles RTL row order, not arbitrary
+fuzzy similarity or page-wide amount searches. No extra words, different
+currency notation, different numbers, or multi-total reassignments are accepted
+through this path. Substring matches cannot hide a leading sign or match only
+part of a number.
+
+Exact amount, page range, currency, final-total labels, and before-discount
+rejection remain mandatory. A reordered quote for workorder 19363's including-
+VAT total can pass. The deterministic extractor now also accepts a printed
+before-discount total when the same summary explicitly proves zero discount,
+prints VAT separately and a final payable amount, and the printed amounts
+reconcile exactly with Decimal. It rejects additional charges, conflicts and
+currency disagreements. Explicit final excluding-VAT totals take priority.
+Evidence retains the source total and supporting discount/VAT/payable rows.
+No missing total is calculated from a VAT rate. With this rule the complete
+workorder quotation is resolved locally, so the hybrid pipeline needs no API.
+Local private-fixture tests use mocked model responses; no document is sent
+externally. Since the historical Claude quote was not retained in diagnostics,
+a real retry is optional for end-to-end confirmation, not required to test this
+normalization locally.
+
+## Phase 1: explicitly approved, stored Django order
+
+Normal imports and `extract_order_quotes` remain local-only. Bedrock is disabled
+unless `QUOTE_BEDROCK_ENABLED=1` AND the command supplies `--bedrock`, `--save`,
+one `--order-id`, and the exact stored PDF SHA-256. Credentials remain in the
+existing environment variables; never pass the key as a command-line argument.
+
+First inspect locally (no API, no database writes):
+
+```bash
+python manage.py extract_order_quotes --order-id 123
+```
+
+Read `pdf_sha256=...`, inspect the quotation, and explicitly approve sending
+that PDF. With the existing Bedrock credential/region/model environment
+configured, this command performs at most one network attempt and saves
+verified results to the existing order:
+
+```bash
+QUOTE_BEDROCK_ENABLED=1 python manage.py extract_order_quotes \
+  --order-id 123 --save --bedrock --approve-sha256 EXACT_HASH_FROM_PREVIEW \
+  --max-api-calls 1 --max-output-tokens 2048 --disable-thinking --effort low
+```
+
+The thinking/effort options above require a model supported by the existing
+adapter (Haiku 5.5). This is a real external call if local results are missing
+or ambiguous; successful/failed local results and manual corrections do not
+trigger fallback. A replacement PDF must receive its own approval.
+
+Attempts are stored inside `OrderRequest.extraction_evidence.bedrock_attempts`,
+keyed by PDF hash. A short transaction durably claims the attempt using row
+locking and a conditional update before any API call. The network runs outside
+transactions. A second transaction checks the PDF and manual corrections before
+saving. Failures leave local values intact; successful partial results retain
+their missing fields. Usage and fixed diagnostic codes are recorded, without
+credentials or response/reasoning contents. Verified quotation evidence is
+stored in the existing evidence field as intended.
+
+Every recorded attempt blocks future API calls for that order/hash, including
+timeouts, rejected responses, and interrupted `claimed` attempts. There is no
+automatic retry or force override. Investigate interrupted attempts manually;
+do not delete claims to retry blindly. No schema migration or background worker
+is needed. Run the command in a process with autocommit enabled, outside any
+enclosing database transaction. The durable ledger depends on retaining the
+existing evidence metadata; administration tools must not clear it.
+
+Mock-only integration tests (temporary database):
+
+```bash
+DATABASE_URL=sqlite:///:memory: FX_AUTO_REFRESH=0 .venv/bin/python -B manage.py test \
+  budget.test_quote_storage budget.test_quote_storage_bedrock \
+  budget.test_quote_extraction budget.test_quote_hybrid budget.test_quote_bedrock
+```
