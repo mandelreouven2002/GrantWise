@@ -512,6 +512,7 @@ def stored_attachments():
 def attach_pending_files(pending):
     """On confirm: the scraped PDFs become the file of their orders. Returns how many were attached."""
     from .models import OrderRequest
+    from .quote_storage import extract_order_quote
     n = 0
     orders = {o.natural_key: o for o in OrderRequest.objects.filter(
         natural_key__in=list(pending.files.values_list("natural_key", flat=True)))}
@@ -522,6 +523,7 @@ def attach_pending_files(pending):
         data = bytes(pf.data)
         OrderFile.objects.update_or_create(order=o, defaults=dict(
             quote_id=pf.quote_id, file_name=pf.file_name, data=data, size=len(data), fetched_at=timezone.now()))
+        extract_order_quote(o.pk)
         n += 1
     return n
 

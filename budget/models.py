@@ -10,6 +10,7 @@ Principles
 from decimal import Decimal
 
 from django.db import models
+from django.core.validators import RegexValidator
 from django.utils import timezone
 
 MONEY = dict(max_digits=14, decimal_places=2)
@@ -447,6 +448,17 @@ class OrderRequest(models.Model):
     amount_currency = models.CharField("מטבע", max_length=3, default="ILS", validators=[validate_currency])
     amount_source = models.CharField(max_length=10, choices=AmountSource.choices, default=AmountSource.NONE)
     lab_notes = models.TextField("הערות מעבדה", blank=True)
+
+    # Quotation facts are independent of funding inputs and LabSuit imports.
+    quoted_total_excl_vat = models.DecimalField("סה״כ לפני מע״מ", **MONEY, null=True, blank=True)
+    quoted_total_incl_vat = models.DecimalField("סה״כ כולל מע״מ", **MONEY, null=True, blank=True)
+    quoted_currency = models.CharField(max_length=3, blank=True, default="",
+        validators=[RegexValidator(r"^[A-Z]{3}$", "יש להזין קוד מטבע בן שלוש אותיות")])
+    extraction_status = models.CharField(max_length=10, blank=True, default="", choices=[
+        ("success", "הצלחה"), ("ambiguous", "דורש בדיקה"), ("missing", "חלקי / חסר"), ("failed", "נכשל")])
+    extraction_evidence = models.JSONField(default=dict, blank=True)
+    # Lock the whole amount/currency pair when a user corrects either total.
+    quoted_manually_corrected = models.BooleanField(default=False)
 
     LABSUIT_FIELDS = [
         "item_name", "catalog_number", "manufacturer", "supplier", "item_type", "requested_by",

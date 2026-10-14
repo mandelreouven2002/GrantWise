@@ -97,7 +97,7 @@ def validate_result(payload: Mapping) -> ExtractionResult:
 
 
 _TOTAL = re.compile(r"סהכ|\btotal\b|\bamount\s+due\b", re.I)
-_NON_FINAL = re.compile(r"\bsub\s*[-]?\s*total\b|\b(?:unit|line|item)\s+total\b|סהכ\s*(?:ביניים|לפריט|לשורה)", re.I)
+_NON_FINAL = re.compile(r"\bsub\s*[-]?\s*total\b|\b(?:unit|line|item)\s+total\b|סהכ\s*(?:ביניים|לפריט|לשורה|פריטים)|לפני\s*הנחה|הנחה\s*לפני|before\s*discount", re.I)
 _EXCL = re.compile(r"לפני\s*מעמ|ללא\s*מעמ|לא\s*כולל\s*מעמ|excl(?:uding)?\.?\s*(?:vat|tax)|before\s*(?:vat|tax)", re.I)
 _INCL = re.compile(r"כולל\s*מעמ|לתשלום|incl(?:uding)?\.?\s*(?:vat|tax)|amount\s+due|total\s+payable", re.I)
 _NUMBER = re.compile(r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)")
@@ -109,32 +109,112 @@ _CURRENCIES = {
 }
 
 
-def extract_text_pages(pages: list[str]) -> ExtractionResult:
-    """Only accept explicit totals on the same line as an explicit currency.
+def _normalize_label(text):
+    text = re.sub(r'[\u200e\u200f\u202a-\u202e"\u05f3\u05f4\']', '', text)
+    # Some PDF producers reverse characters, others reverse fragments/words.
+    for reversed_word, normal in (("םולשתל", "לתשלום"), ("ינפל", "לפני"),
+                                  ("ללוכ", "כולל"), ("אלל", "ללא")):
+        text = re.sub(rf'(?<![א-ת]){reversed_word}(?![א-ת])', normal, text)
+    text = re.sub(r'(?<![א-ת])(?:סה\s*כ|כ\s*סה|כ\s*הס)(?![א-ת])', 'סהכ', text)
+    text = re.sub(r'(?<![א-ת])(?:מע\s*מ|מ\s*מע|מ\s*עמ)(?![א-ת])', 'מעמ', text)
+    text = re.sub(r'(?<![א-ת])(?:סך\s*הכ[ול]+|הכ[ול]+\s*סך)(?![א-ת])', 'סהכ', text)
+    text = re.sub(r'מעמ\s*לפני', 'לפני מעמ', text)
+    text = re.sub(r'(?<![א-ת])ח\s*ש(?![א-ת])', 'שח', text)
+    return text
 
-This deliberately narrow fast path defers complex layouts and number formats.
-Evidence retains original text; normalization is used only for label matching.
-"""
+
+def _vat_row(line):
+    """Recognize a printed VAT summary row, including decimal percentages.
+
+    Only its position is used; its amount and percentage are never calculated.
+    """
+    return (bool(re.search(r'מעמ|\bVAT\b|מס\s*ערך\s*מוסף|מוסף\s*ערך\s*מס', line, re.I))
+            and not _TOTAL.search(line) and bool(_NUMBER.search(line))
+            and any(pattern.search(line) for pattern in _CURRENCIES.values()))
+
+
+def _line_value(line, original, page):
+    numbers = _NUMBER.findall(line)
+    currencies = [code for code, pattern in _CURRENCIES.items() if pattern.search(line)]
+    if len(numbers) != 1 or len(currencies) != 1 or re.search(
+        r'[-−]\s*(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)', line
+    ):
+        return None
+    return (numbers[0].replace(',', ''), currencies[0], original, page)
+
+
+def extract_text_pages(pages: list[str]) -> ExtractionResult:
+    """Extract printed totals, with a conservative same-page VAT-summary path.
+
+    Amount and currency must share a line. An otherwise unqualified total is
+    accepted before VAT only in a nearby total/VAT/payable summary, with no
+    intervening monetary adjustment. Evidence retains the original text.
+    """
     candidates = {name: [] for name in FIELDS}
+    discount_context = False
+    summary_confirmed = False
+    summary_uncertain = False
+    after_discount_explicit = False
     for page, text in enumerate(pages, 1):
-        for original in text.splitlines():
-            line = re.sub(r'[\u200e\u200f\u202a-\u202e"\u05f3\u05f4\']', '', original)
+        lines = [(original, _normalize_label(original)) for original in text.splitlines() if original.strip()]
+        discount_context |= any(re.search(r'הנחה|discount', line, re.I) for _, line in lines)
+        generic = []
+        payable = []
+        vat_rows = []
+        for index, (original, line) in enumerate(lines):
+            value = _line_value(line, original, page)
+            if _vat_row(line):
+                vat_rows.append(index)
             if not _TOTAL.search(line) or _NON_FINAL.search(line):
                 continue
             excl = bool(_EXCL.search(line))
             incl = bool(_INCL.search(line)) and not excl
             if not (excl or incl):
+                if value and '%' not in line:
+                    generic.append((index, value))
                 continue
             # Totals preceding a discount require document-level understanding.
             name = FIELDS[0 if excl else 1]
-            numbers = _NUMBER.findall(line)
-            currencies = [code for code, pattern in _CURRENCIES.items() if pattern.search(line)]
-            if len(numbers) != 1 or len(currencies) != 1 or '%' in line:
+            if value is None or '%' in line:
                 candidates[name].append(None)
                 continue
-            candidates[name].append((numbers[0].replace(',', ''), currencies[0], original, page))
+            candidates[name].append(value)
+            if excl:
+                generic.append((index, value))
+            if excl and re.search(r'אחרי\s*הנח|לאחר\s*הנח|הנחה\s*לאחר|after\s*discount', line, re.I):
+                after_discount_explicit = True
+            if incl:
+                payable.append((index, value))
+        # A printed total -> VAT row -> payable total is a summary section.
+        # Keep the monetary values as printed; never derive totals from VAT.
+        for vat_index in vat_rows:
+            before = [(i, v) for i, v in generic if 0 < vat_index - i <= 8]
+            # An otherwise generic grand total immediately after the VAT row
+            # is final only within this summary context.
+            final_generic = [(i, v) for i, v in generic if i == vat_index + 1
+                             and not _EXCL.search(lines[i][1])]
+            after = [(i, v) for i, v in payable if 0 < i - vat_index <= 3] + final_generic
+            if not before or len(after) != 1:
+                continue
+            total_index, total = before[-1]
+            payable_index, _ = after[0]
+            vat_currencies = {code for code, pattern in _CURRENCIES.items()
+                              if pattern.search(lines[vat_index][1])}
+            if vat_currencies != {total[1]}:
+                summary_uncertain = True
+            between = lines[total_index + 1:payable_index]
+            # A separate monetary adjustment invalidates the earlier total.
+            if any(_NUMBER.search(line) and not _vat_row(line)
+                   for _, line in between):
+                summary_uncertain = True
+                continue
+            support = '\n'.join(original for original, _ in lines[total_index:payable_index + 1])
+            candidates[FIELDS[0]].append((total[0], total[1], support, page))
+            if final_generic:
+                candidates[FIELDS[1]].append(after[0][1])
+            summary_confirmed = True
     payload = {"evidence": {}, "amount_currencies": {}}
-    ambiguous = False
+    ambiguous = summary_uncertain
     for name, found in candidates.items():
         unique = {(x[0], x[1]) for x in found if x is not None}
         if None in found or len(unique) > 1:
@@ -145,8 +225,10 @@ Evidence retains original text; normalization is used only for label matching.
             payload[name] = amount
             payload["amount_currencies"][name] = currency
             payload["evidence"][name] = {"text": text, "page": page}
-    # A local match alone cannot prove the pre-VAT total is after discounts.
-    if any(re.search(r"הנחה|discount", page, re.I) for page in pages):
+    # Discounts do not invalidate a payable total. An exclusive total needs
+    # summary context or an explicit after-discount label when discounts exist.
+    if (discount_context and candidates[FIELDS[0]]
+            and not (summary_confirmed or after_discount_explicit)):
         ambiguous = True
     payload["extraction_status"] = "ambiguous" if ambiguous else "missing"
     return validate_result(payload)
