@@ -2,129 +2,155 @@
 {% extends "budget/base.html" %}
 
 {% block title %}
-הזמנות ודרישות · LabFund
+הזמנות ודרישות · GrantWise
 {% endblock %}
 
 {% block content %}
 
-<div class="titlebar">
-    <h1>
-        הזמנות ודרישות
-        <span class="info" tabindex="0" aria-label="מידע">
-            i
-            <span class="tip">
-                הסכום נלקח מהמחיר ב-LabSuit,
-                ואפשר לתקן אותו כאן.
-                בקשה בלי סכום לא מקבלת המלצה
-                עד שמזינים אותו.
-                סכום שהוזן ידנית לא נדרס
-                בעדכון מקובץ.
-            </span>
-        </span>
-    </h1>
+<!-- Laboratory header -->
+<section class="orders-hero">
+    
+    <h1>הזמנות ודרישות</h1>
 
-    {% include "budget/_lastimport.html" %}
-
-    <span class="spacer"></span>
-
-    {% include "budget/_actions.html" with default_mode="replace" %}
-</div>
-
-<form class="toolbar" method="get">
-
-    <input
-        class="f"
-        name="q"
-        value="{{ request.GET.q }}"
-        placeholder="חיפוש: פריט, מק״ט, ספק, הזמנת רכש, מבקש"
-    >
-
-    <select class="f" name="year"
-            onchange="this.form.submit()">
-
-        {% for y in years %}
-            <option value="{{ y }}"
-                {% if y|stringformat:"s" == year %}
-                    selected
-                {% endif %}>
-                {{ y }}
-            </option>
-        {% endfor %}
-
-        <option value="all"
-            {% if year == "all" %}
-                selected
-            {% endif %}>
-            כל השנים
-        </option>
-
-    </select>
-
-    <select class="f" name="status"
-            onchange="this.form.submit()">
-
-        <option value="">כל הסטטוסים</option>
-
-        {% for s in t.table.cols.4.choices %}
-            <option value="{{ s.0 }}"
-                {% if s.0 == request.GET.status %}
-                    selected
-                {% endif %}>
-                {{ s.1 }}
-            </option>
-        {% endfor %}
-
-    </select>
-
-    <label class="muted">
-        <input type="checkbox"
-               name="open"
-               value="1"
-               {% if request.GET.open == "1" %}checked{% endif %}
-               onchange="this.form.submit()">
-        רק מאושרות שלא הוזמנו
-    </label>
-
-    <label class="muted">
-        <input type="checkbox"
-               name="pending"
-               value="1"
-               {% if request.GET.pending == "1" %}checked{% endif %}
-               onchange="this.form.submit()">
-        רק ממתינות להחלטת מימון
-    </label>
-
-    <label class="muted">
-        <input type="checkbox"
-               name="noamount"
-               value="1"
-               {% if request.GET.noamount == "1" %}checked{% endif %}
-               onchange="this.form.submit()">
-        רק בלי סכום
-    </label>
-
-    <button class="btn small ghost">
-        סינון
-    </button>
-
-    <span class="muted">
-        {{ total }} הזמנות
-    </span>
-
-</form>
-
-{% if in_bin %}
-    <p class="card" style="margin:0 0 10px">
-        <b>{{ in_bin }}</b>
-        הזמנות אושרו והועברו לסל המחזור בדף ההמלצות,
-        ולכן אינן מופיעות כאן.
-
-        <a href="{% url 'resolve' %}#bin">
-            לסל המחזור ←
-        </a>
+    <p class="orders-subtitle">
+        ניהול הזמנות, דרישות ורכישות עבור מחקר במעבדה
     </p>
-{% endif %}
+</section>
 
-{% include "budget/_table.html" %}
+<!-- Main content -->
+<div class="orders-panel">
+
+    <!-- Actions -->
+    <div class="titlebar">
+
+        {% include "budget/_lastimport.html" %}
+
+        <span class="spacer"></span>
+
+        {% include "budget/_actions.html" with default_mode="replace" %}
+
+    </div>
+
+    <!-- Filters -->
+    <form class="toolbar" method="get">
+
+        <input
+            class="f"
+            name="q"
+            value="{{ request.GET.q }}"
+            placeholder="חיפוש: פריט, מק״ט, ספק, הזמנת רכש, מבקש"
+            aria-label="חיפוש הזמנות"
+        >
+
+        <!-- Year -->
+        <select
+            class="f"
+            name="year"
+            aria-label="בחירת שנה"
+            onchange="this.form.submit()"
+        >
+
+            {% for y in years %}
+                <option
+                    value="{{ y }}"
+                    {% if y|stringformat:"s" == year %}selected{% endif %}
+                >
+                    {{ y }}
+                </option>
+            {% endfor %}
+
+            <option
+                value="all"
+                {% if year == "all" %}selected{% endif %}
+            >
+                כל השנים
+            </option>
+
+        </select>
+
+        <!-- Status -->
+        <select
+            class="f"
+            name="status"
+            aria-label="סינון לפי סטטוס"
+            onchange="this.form.submit()"
+        >
+            <option value="">כל הסטטוסים</option>
+
+            {% for s in t.table.cols.4.choices %}
+                <option
+                    value="{{ s.0 }}"
+                    {% if s.0 == request.GET.status %}selected{% endif %}
+                >
+                    {{ s.1 }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <!-- Approved but not ordered -->
+        <label class="muted">
+            <input
+                type="checkbox"
+                name="open"
+                value="1"
+                {% if request.GET.open == "1" %}checked{% endif %}
+                onchange="this.form.submit()"
+            >
+            רק מאושרות שלא הוזמנו
+        </label>
+
+        <!-- Awaiting funding decision -->
+        <label class="muted">
+            <input
+                type="checkbox"
+                name="pending"
+                value="1"
+                {% if request.GET.pending == "1" %}checked{% endif %}
+                onchange="this.form.submit()"
+            >
+            רק ממתינות להחלטת מימון
+        </label>
+
+        <!-- Missing amount -->
+        <label class="muted">
+            <input
+                type="checkbox"
+                name="noamount"
+                value="1"
+                {% if request.GET.noamount == "1" %}checked{% endif %}
+                onchange="this.form.submit()"
+            >
+            רק בלי סכום
+        </label>
+
+        <button type="submit" class="btn small ghost">
+            סינון
+        </button>
+
+        <span class="muted">
+            {{ total }} הזמנות
+        </span>
+
+    </form>
+
+    <!-- Recycle bin notice -->
+    {% if in_bin %}
+        <p class="card" style="margin:0 0 14px">
+
+            <b>{{ in_bin }}</b>
+            הזמנות אושרו והועברו לסל המחזור
+            בדף ההמלצות, ולכן אינן מופיעות כאן.
+
+            <a href="{% url 'resolve' %}#bin">
+                לסל המחזור ←
+            </a>
+
+        </p>
+    {% endif %}
+
+    <!-- Existing functional table -->
+    {% include "budget/_table.html" %}
+
+</div>
 
 {% endblock %}
