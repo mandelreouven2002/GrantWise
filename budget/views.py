@@ -12,6 +12,7 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db.models import Count, Q, Sum
+from django.db.models.deletion import ProtectedError
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -543,7 +544,15 @@ def api_delete(request, key, pk):
         # Deleting is deleting (a LabSuit request comes back as a new one if a later export lists it again).
         # A decision that is not marked "updated" goes with its order: its money is released.
         Allocation.objects.filter(order=obj, lab_updated_at__isnull=True).delete()
-    obj.delete()
+    try:
+        obj.delete()
+    except ProtectedError:
+        if key != "grants":
+            raise
+        messages.error(request, "לא ניתן למחוק את המענק כי הוא מקושר להחלטות מימון.")
+    else:
+        if key == "grants":
+            messages.success(request, "נתוני המענק נמחקו.")
     return redirect(request.POST.get("next") or "/")
 
 

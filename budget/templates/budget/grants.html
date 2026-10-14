@@ -9,5 +9,4 @@
   <div class="kpi"><b>{{ total_ils|money }} ₪</b><span>זמין במענקים בתוקף (שווי משוער)</span></div>
 </div>
 {% include "budget/_table.html" %}
-<p class="toolbar"><a class="btn small ghost" href="?all={% if show_all %}0{% else %}1{% endif %}">{% if show_all %}רק מענקים פעילים{% else %}הצגת גם מענקים לא פעילים{% endif %}</a></p>
 {% endblock %}

@@ -1814,3 +1814,42 @@ class AiAssistTests(TestCase):
             page = self.post("one too many")
         self.assertEqual(ask.call_count, ai_assist.CALLS_PER_HOUR)
         self.assertContains(page, "מגבלה")
+
+
+@override_settings(FX_AUTO_REFRESH=False, STORAGES={
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+})
+class GrantDeletionTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import User
+        self.client.force_login(User.objects.create_user("grant-delete-user"))
+        self.grant = Grant.objects.create(number="DELETE-ME", currency="ILS", balance_total=100)
+        self.url = f"/api/grants/{self.grant.pk}/delete/"
+
+    def test_grants_page_has_confirmation(self):
+        response = self.client.get("/grants/")
+        self.assertContains(response, self.url)
+        self.assertContains(response, "האם אתה בטוח שברצונך למחוק את נתוני המענק הזה?")
+
+    def test_post_deletes_grant_and_its_lines(self):
+        batch = ImportBatch.objects.create(source="sap_grants", file_name="test", as_of=TODAY)
+        GrantLine.objects.create(batch=batch, grant=self.grant, category_id="MATERIAL", balance=100)
+        response = self.client.post(self.url, {"next": "/grants/"})
+        self.assertRedirects(response, "/grants/")
+        self.assertFalse(Grant.objects.filter(pk=self.grant.pk).exists())
+        self.assertFalse(GrantLine.objects.filter(grant_id=self.grant.pk).exists())
+
+    def test_get_cannot_delete(self):
+        self.assertEqual(self.client.get(self.url).status_code, 405)
+        self.assertTrue(Grant.objects.filter(pk=self.grant.pk).exists())
+
+    def test_allocated_grant_shows_error_and_keeps_data(self):
+        allocation = Allocation.objects.create(
+            grant=self.grant, category_id="MATERIAL", amount_orig=10,
+            currency_orig="ILS", amount_ils=10, amount_grant_ccy=10,
+        )
+        response = self.client.post(self.url, {"next": "/grants/"}, follow=True)
+        self.assertContains(response, "לא ניתן למחוק את המענק כי הוא מקושר להחלטות מימון.")
+        self.assertTrue(Grant.objects.filter(pk=self.grant.pk).exists())
+        self.assertTrue(Allocation.objects.filter(pk=allocation.pk).exists())

@@ -78,7 +78,7 @@ LINE_CATS = [("SALARY", "שכר"), ("MATERIAL", "חומרים"), ("EQUIPMENT", "
 STATUSES = [(s, s) for s in ["requested", "approved", "ordered", "received", "canceled"]]
 
 TABLES = {t.key: t for t in [
-    Table("grants", Grant, "מענקים", source="sap_grants",
+    Table("grants", Grant, "מענקים", source="sap_grants", deletable=True,
           add=["number", "sponsor", "currency", "start_date", "end_date", "balance_total"],
           cols=[Col("number", "מענק", "ro", required=True), Col("sponsor", "גורם מממן", width="w-m"),
                 Col("currency", "מטבע", "currency", required=True),

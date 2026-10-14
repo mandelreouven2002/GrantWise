@@ -8,7 +8,7 @@
   {% for r in t.rows %}
     <tr data-pk="{{ r.pk }}" class="{{ r.cls }}">
       {% for c in r.cells %}{% include "budget/_cell.html" %}{% endfor %}
-      {% if t.table.deletable %}<td><form method="post" action="{% url 'api_delete' t.table.key r.pk %}" onsubmit="return confirm('למחוק את השורה?')">{% csrf_token %}<input type="hidden" name="next" value="{{ request.get_full_path }}"><button class="btn link" title="מחיקה">✕</button></form></td>{% endif %}
+      {% if t.table.deletable %}<td><form method="post" action="{% url 'api_delete' t.table.key r.pk %}" onsubmit="return confirm('{% if t.table.key == 'grants' %}האם אתה בטוח שברצונך למחוק את נתוני המענק הזה?{% else %}למחוק את השורה?{% endif %}')">{% csrf_token %}<input type="hidden" name="next" value="{{ request.get_full_path }}"><button type="submit" class="btn link" title="מחיקה" aria-label="מחיקת שורה">✕</button></form></td>{% endif %}
     </tr>
   {% empty %}
     <tr><td class="ro muted" colspan="99">אין שורות להצגה</td></tr>
