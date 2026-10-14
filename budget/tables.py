@@ -92,10 +92,28 @@ TABLES = {t.key: t for t in [
                 Col("order_cutoff_days", "ימי חסימה לפני סיום", "int", hidden=True),
                 Col("is_active", "פעיל", "bool", hidden=True),
                 Col("start_date", "התחלה", "date", hidden=True)]),
-    Table("orders", OrderRequest, "הזמנות ודרישות", source="labsuit_orders",
+    # Materials: the two quoted totals (with / without VAT) are the amount; the LabSuit update lives here.
+    Table("orders", OrderRequest, "הזמנות חומרים", source="labsuit_orders",
+          search=["item_name", "catalog_number", "supplier", "po_number", "grant_label", "project_text", "requested_by"],
+          add=["item_name", "requested_by", "supplier", "catalog_number", "quantity", "quoted_total_incl_vat",
+               "quoted_total_excl_vat", "quoted_currency", "project_text"],
+          deletable=True,
+          cols=[Col("date_requested", "תאריך", "date"), Col("item_name", "פריט", width="w-l", required=True),
+                Col("quoted_total_incl_vat", "סה״כ כולל מע״מ", "quote_money"),
+                Col("quoted_total_excl_vat", "סה״כ לפני מע״מ", "quote_money"),
+                Col("status", "סטטוס", "select", STATUSES), Col("project_text", "פרויקט", "suggest", width="w-m"),
+                Col("category", "סעיף", "category"),
+                Col("requested_by", "מבקש/ת", width="w-m"),
+                Col("supplier", "ספק", width="w-m"), Col("po_number", "הזמנת רכש"), Col("quantity", "כמות", "num"),
+                Col("quote_pdf", "הצעת מחיר", "calc"),
+                Col("quoted_currency", "מטבע הצעה", hidden=True),
+                Col("extraction_status", "מצב חילוץ", "ro", hidden=True),
+                Col("lab_notes", "הערות", width="w-l")]),
+    # Everything that is not a material: one typed amount, VAT plays no role.
+    Table("orders_other", OrderRequest, "אחר",
           search=["item_name", "catalog_number", "supplier", "po_number", "grant_label", "project_text", "requested_by"],
           add=["item_name", "requested_by", "supplier", "catalog_number", "quantity", "amount_est",
-               "amount_currency", "category", "grant_label"],
+               "amount_currency", "category", "project_text"],
           deletable=True,
           cols=[Col("date_requested", "תאריך", "date"), Col("item_name", "פריט", width="w-l", required=True),
                 Col("amount_est", "סכום", "money"), Col("amount_currency", "מטבע", "currency"),
@@ -104,10 +122,6 @@ TABLES = {t.key: t for t in [
                 Col("requested_by", "מבקש/ת", width="w-m"),
                 Col("supplier", "ספק", width="w-m"), Col("po_number", "הזמנת רכש"), Col("quantity", "כמות", "num"),
                 Col("amount_source", "מקור סכום", "ro"), Col("quote_pdf", "הצעת מחיר", "calc"),
-                Col("quoted_total_excl_vat", "סה״כ לפני מע״מ", "quote_money"),
-                Col("quoted_total_incl_vat", "סה״כ כולל מע״מ", "quote_money"),
-                Col("quoted_currency", "מטבע הצעה", hidden=True),
-                Col("extraction_status", "מצב חילוץ", "ro", hidden=True),
                 Col("lab_notes", "הערות", width="w-l")]),
     Table("fx", FxRate, "שערי חליפין", deletable=True, per_page=20,
           add=["date", "currency", "rate_to_ils"],
@@ -294,7 +308,7 @@ def create_row(table, data, parent=None):
         u.save()
         return u
     obj = table.model()
-    if table.key == "orders":
+    if table.key in ("orders", "orders_other"):
         obj.natural_key, obj.source = f"manual-{uuid.uuid4().hex[:16]}", "manual"
         obj.date_requested = date.today()
         obj.status = "approved"
@@ -326,10 +340,15 @@ def create_row(table, data, parent=None):
             setattr(obj, col.field, _to_python(obj, col.field, raw))
         elif col.required:
             raise ValidationError(f"חסר: {col.label}")
-    if table.key == "orders" and obj.amount_est:
+    if table.key in ("orders", "orders_other") and obj.amount_est:
         obj.amount_source = OrderRequest.AmountSource.MANUAL
-    if table.key == "orders" and obj.category_id is None:
-        obj.category_id = "MATERIAL"
+    if table.key == "orders":
+        if obj.category_id is None:
+            obj.category_id = "MATERIAL"
+        if obj.quoted_total_incl_vat is not None or obj.quoted_total_excl_vat is not None:
+            obj.quoted_manually_corrected = True        # typed by the lab: a PDF extraction must not replace it
+    if table.key == "orders_other" and obj.category_id in (None, "MATERIAL"):
+        obj.category_id = "OTHER"
     obj.full_clean(validate_unique=table.key != "fx")
     if table.key == "fx":
         FxRate.objects.update_or_create(date=obj.date, currency=obj.currency,

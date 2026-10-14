@@ -2,23 +2,27 @@
 {% extends "budget/base.html" %}
 
 {% block title %}
-הזמנות ודרישות · LabFund
+{{ page_title }} · LabFund
 {% endblock %}
 
 {% block content %}
 
 <div class="titlebar">
     <h1>
-        הזמנות ודרישות
+        {{ page_title }}
         <span class="info" tabindex="0" aria-label="מידע">
             i
             <span class="tip">
-                הסכום נלקח מהמחיר ב-LabSuit,
-                ואפשר לתקן אותו כאן.
-                בקשה בלי סכום לא מקבלת המלצה
-                עד שמזינים אותו.
-                סכום שהוזן ידנית לא נדרס
-                בעדכון מקובץ.
+                {% if kind == "materials" %}
+                הסכום של חומרים הוא שני סכומי ההצעה: כולל מע״מ ולפני מע״מ,
+                ואפשר לתקן כל אחד מהם כאן. מענק שמשלם מע״מ מחויב בסכום כולל מע״מ,
+                ומענק שלא משלם מע״מ בסכום לפני מע״מ.
+                בקשה בלי סכום לא מקבלת המלצה עד שמזינים אותו.
+                סכום שהוזן ידנית לא נדרס בעדכון מקובץ או בחילוץ מחדש.
+                {% else %}
+                כל מה שאינו חומרים. הסכום שכותבים הוא הסכום, והוא זה שקובע בהמלצות:
+                מע״מ לא משפיע כאן.
+                {% endif %}
             </span>
         </span>
     </h1>
@@ -27,7 +31,7 @@
 
     <span class="spacer"></span>
 
-    {% include "budget/_actions.html" with default_mode="replace" %}
+    {% if kind == "materials" %}{% include "budget/_actions.html" with default_mode="replace" %}{% endif %}
 </div>
 
 <form class="toolbar" method="get">
@@ -65,7 +69,7 @@
 
         <option value="">כל הסטטוסים</option>
 
-        {% for s in t.table.cols.4.choices %}
+        {% for s in status_choices %}
             <option value="{{ s.0 }}"
                 {% if s.0 == request.GET.status %}
                     selected

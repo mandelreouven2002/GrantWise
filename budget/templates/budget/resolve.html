@@ -55,12 +55,12 @@
     <td class="ro" style="white-space:normal;min-width:220px"><b>{{ r.order.item_name|truncatechars:70 }}</b>
       <div class="reason">{{ r.order.supplier }} · {{ r.order.requested_by }} · {{ r.order.date_requested|date:"d/m/Y" }}</div></td>
     <td class="ro">{{ r.order.project_text|default:r.order.grant_label|default:"—" }}</td>
-    <td class="ro num">{{ r.order.amount_est|money:2|default:"—" }}</td>
-    <td class="ro">{{ r.order.amount_currency }}</td>
+    <td class="ro num">{{ r.amt|money:2|default:"—" }}</td>
+    <td class="ro">{{ r.amt_cur }}</td>
     <td class="ro">{{ r.order.category.name_he|default:"—" }}</td>
     <td class="ro" style="white-space:normal">
       {% if r.state == "noamount" %}
-        <span class="tag warn">חסר סכום</span> <span class="reason">יש להזין סכום ב<a href="{% url 'orders' %}?noamount=1">הזמנות ודרישות</a>, וההמלצה תחושב מיד</span>
+        <span class="tag warn">חסר סכום</span> <span class="reason">יש להזין סכום ב<a href="{% if r.is_material %}{% url 'orders' %}{% else %}{% url 'other' %}{% endif %}?noamount=1">{% if r.is_material %}הזמנות חומרים{% else %}אחר{% endif %}</a>, וההמלצה תחושב מיד</span>
       {% elif r.state == "skipped" %}
         <span class="tag warn">לא בחישוב</span> <span class="reason">{{ r.note }}</span>
       {% elif r.state == "standing" %}
@@ -97,7 +97,7 @@
     <td class="ro status" style="white-space:normal;min-width:110px">{% if r.state == "unfunded" %}<span class="tag bad">ללא מקור</span>{% endif %}</td>
   </tr>
   {% empty %}
-  <tr><td class="ro muted" colspan="10">אין כרגע בקשות פתוחות ב"הזמנות ודרישות".</td></tr>
+  <tr><td class="ro muted" colspan="10">אין כרגע בקשות פתוחות ב"הזמנות חומרים" וב"אחר".</td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -117,19 +117,19 @@
 
 {% endif %}
 
-<h2 id="bin">♻ סל מחזור <span class="muted" style="font-weight:400">— אושרו וממתינים לעדכון במערכות המעבדה ({{ bin|length }})</span> <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הזמנות שאושרו כאן יוצאות מ"הזמנות ודרישות" ומחכות בסל הזה, עם הנימוק של ההמלצה.<br><br>"♻ מחזור" מבטל את האישור ומחזיר את ההזמנה ל"הזמנות ודרישות" כבקשה פתוחה: ההמלצה תחושב מחדש לפי השערים והיתרות של היום (כולל מטבע ששערו השתנה).<br><br>"עודכן במערכות המעבדה" = עדכנת את ה-GRANT_ID ב-LabSuit או את ההזמנה ב-SAP. ההזמנה יוצאת מהסל ולא תופיע יותר בהזמנות ובהמלצות, והסכום שלה ממשיך לרדת מהמענק (לא חוזר אליו). הוא נספר עד שדוח SAP יכסה את ההזמנה: דוח שתאריכו מאוחר מתאריך ההזמנה ב-LabSuit, או מהיום שסימנת. SAP מייצא רק יתרות, לכן זו הסקה לפי תאריכים והזמין הוא הערכה שמרנית.</span></span></h2>
+<h2 id="bin">♻ סל מחזור <span class="muted" style="font-weight:400">— אושרו וממתינים לעדכון במערכות המעבדה ({{ bin|length }})</span> <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הזמנות שאושרו כאן יוצאות מדפי ההזמנות ומחכות בסל הזה, עם הנימוק של ההמלצה.<br><br>"♻ מחזור" מבטל את האישור ומחזיר את ההזמנה לדף ההזמנות המתאים (חומרים / אחר) כבקשה פתוחה: ההמלצה תחושב מחדש לפי השערים והיתרות של היום (כולל מטבע ששערו השתנה).<br><br>"עודכן במערכות המעבדה" = עדכנת את ה-GRANT_ID ב-LabSuit או את ההזמנה ב-SAP. ההזמנה יוצאת מהסל ולא תופיע יותר בהזמנות ובהמלצות, והסכום שלה ממשיך לרדת מהמענק (לא חוזר אליו). הוא נספר עד שדוח SAP יכסה את ההזמנה: דוח שתאריכו מאוחר מתאריך ההזמנה ב-LabSuit, או מהיום שסימנת. SAP מייצא רק יתרות, לכן זו הסקה לפי תאריכים והזמין הוא הערכה שמרנית.</span></span></h2>
 <div class="tbl-wrap"><table>
   <tr><th>פריט</th><th>מימון שאושר</th><th>נימוק ההמלצה</th><th class="num">≈ ₪</th><th>אושר</th><th>עדכון</th><th></th></tr>
   {% for g in bin %}<tr>
     <td class="ro" style="white-space:normal;min-width:200px"><b>{{ g.order.item_name|truncatechars:60 }}</b>
       <div class="reason">{{ g.order.supplier }} · {{ g.order.requested_by }} · {{ g.order.date_requested|date:"d/m/Y" }}</div>
-      <div class="reason">{{ g.order.amount_est|money:2 }} {{ g.order.amount_currency }}</div></td>
+      <div class="reason">{{ g.amt|money:2 }} {{ g.amt_cur }}</div></td>
     <td class="ro" style="white-space:normal">{% for a in g.lines %}<div><b>{{ a.grant_id }}</b> · {{ a.amount_grant_ccy|money:2 }} {{ a.grant.currency }}{% if g.lines|length > 1 %} <span class="muted">({{ a.amount_orig|money:2 }} {{ a.currency_orig }})</span>{% endif %}</div>{% endfor %}</td>
     <td class="ro reason" style="white-space:normal;min-width:260px">{% for a in g.lines %}<div>{% if g.lines|length > 1 %}<b>{{ a.grant_id }}:</b> {% endif %}{{ a.reason|default:"—"|linebreaksbr }}</div>{% endfor %}</td>
     <td class="ro num">{{ g.then|money:0 }}{% if g.drift %}<div class="reason"><span class="tag warn">השתנה</span> היום ≈ {{ g.now|money:0 }}</div>{% endif %}</td>
     <td class="ro">{{ g.decided_by }} · {{ g.decided_at|date:"d/m/Y H:i" }}</td>
     <td class="ro"><form method="post" action="{% url 'allocation_lab_updated' g.pk %}" class="inline" onsubmit="return confirm('ההזמנה תוסר מהסל ולא תופיע יותר במערכת. הסכום יישאר מנוכה מהמענק. להמשיך?')">{% csrf_token %}<button class="btn small ghost">עודכן במערכות המעבדה</button></form></td>
-    <td><form method="post" action="{% url 'allocation_recycle' g.pk %}" class="inline">{% csrf_token %}<button class="btn small" title="ביטול האישור והחזרה להזמנות ודרישות">♻ מחזור</button></form></td></tr>
+    <td><form method="post" action="{% url 'allocation_recycle' g.pk %}" class="inline">{% csrf_token %}<button class="btn small" title="ביטול האישור והחזרה לדף ההזמנות המתאים">♻ מחזור</button></form></td></tr>
   {% empty %}<tr><td class="ro muted" colspan="7">הסל ריק — הזמנות שיאושרו יופיעו כאן.</td></tr>{% endfor %}
 </table></div>
 
@@ -142,9 +142,9 @@
   const TOL = 0.01;
 
   function toGrant(o, g, amount){                 // order currency -> grant currency incl. FX margin
-    const m = o.cur !== g.cur ? D.margin : 0;      // and, for a grant that does not pay VAT, the price before VAT
-    const vat = (D.noVat || []).includes(o.cat) ? 1 : (g.vat || 1);   // salary and services carry no VAT
-    return amount * o.rate * (1 + m) / g.rate / vat;
+    const m = o.cur !== g.cur ? D.margin : 0;
+    const vat = (o.mat && !g.vatReq) ? o.ratio : 1;  // materials from a grant that pays no VAT: the price before VAT
+    return amount * o.rate * (1 + m) / g.rate * vat;
   }
 
   function recalc(){

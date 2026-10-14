@@ -748,7 +748,12 @@ dialog .actions {
 
         <a href="{% url 'orders' %}"
            class="{% if u == 'orders' or u == 'home' %}on{% endif %}">
-            הזמנות ודרישות
+            הזמנות חומרים
+        </a>
+
+        <a href="{% url 'other' %}"
+           class="{% if u == 'other' %}on{% endif %}">
+            אחר
         </a>
 
         <a href="{% url 'grants' %}"

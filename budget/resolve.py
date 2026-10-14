@@ -35,6 +35,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from .amounts import order_amount, vat_factor
 from .funding import alias_for
 from .fx import rate_to_ils
 from .models import (Allocation, BudgetCategory, FundingAlias, Grant, GrantRule, ImportBatch,
@@ -74,6 +75,8 @@ class Candidate:
     rate: Decimal                      # ₪ per unit of order currency
     amount_ils: Decimal
     category: str
+    material: bool = False
+    vat_ratio: Decimal = Decimal("1")      # price before VAT / price (materials only)
     fixed_grant: str | None = None
     notes: list = field(default_factory=list)
 
@@ -231,7 +234,7 @@ def unseen_orders(sap_as_of, today=None):
         return []
     out = []
     qs = (OrderRequest.objects.filter(is_current=True, date_ordered__gt=sap_as_of)
-          .exclude(po_number="").exclude(status="canceled").exclude(amount_est__isnull=True)
+          .exclude(po_number="").exclude(status="canceled")
           .exclude(allocations__status=Allocation.Status.APPROVED).distinct())
     # a decision whose order row was deleted is still reserved: don't subtract the same order a second time
     reserved_keys = set(Allocation.objects.filter(status=Allocation.Status.APPROVED, order__isnull=True)
@@ -243,13 +246,16 @@ def unseen_orders(sap_as_of, today=None):
         if alias.kind != FundingAlias.Kind.GRANT or not alias.grant:
             continue
         g = alias.grant
+        a = order_amount(o)
+        if a is None:
+            continue
         try:
-            r_o, _ = rate_to_ils(o.amount_currency, today)
+            r_o, _ = rate_to_ils(a.currency, today)
             r_g, _ = rate_to_ils(g.currency, today)
         except Exception:  # noqa: BLE001 — a missing rate just means we can't count it
             continue
         out.append((g.number, o.category_id or "MATERIAL",
-                    (o.amount_est * r_o / r_g / vat_divisor(g, o.category_id or "MATERIAL")).quantize(Q), o))
+                    (a.gross * r_o / r_g * (a.ratio if a.material and not g.vat_required else Decimal("1"))).quantize(Q), o))
     return out
 
 
@@ -308,9 +314,10 @@ def eligible(c: Candidate, s: GrantState, today):
 
 
 def make_candidate(o, today):
-    rate, _ = rate_to_ils(o.amount_currency, today)
-    c = Candidate(order=o, amount=o.amount_est, currency=o.amount_currency, rate=rate,
-                  amount_ils=(o.amount_est * rate).quantize(Q), category=o.category_id or "MATERIAL")
+    a = order_amount(o)
+    rate, _ = rate_to_ils(a.currency, today)
+    c = Candidate(order=o, amount=a.gross, currency=a.currency, rate=rate, amount_ils=(a.gross * rate).quantize(Q),
+                  category=o.category_id or "MATERIAL", material=a.material, vat_ratio=a.ratio)
     return c
 
 
@@ -318,17 +325,14 @@ def margin_for(c, s, p):
     return Decimal(str(p["fx_margin"])) if c.currency != s.grant.currency else Decimal("0")
 
 
-def vat_divisor(grant, category=None):
-    """1 for a grant that pays VAT (the order's price is charged in full); 1.18 for one that does not:
-    the price paid from it is the price before VAT. Salary and services carry no VAT to begin with, so
-    for them the price stays the price whatever the grant."""
-    if grant.vat_required or category in settings.RESOLVE_DEFAULTS["vat_free_categories"]:
-        return Decimal("1")
-    return Decimal(str(settings.RESOLVE_DEFAULTS["vat_rate"]))
+def charge_factor(c, grant):
+    """Share of the price that comes off the grant: 1, or — for materials taken from a grant that pays no
+    VAT — the price before VAT over the price (from the quote's two totals; 1/1.18 when only one is known)."""
+    return c.vat_ratio if (c.material and not grant.vat_required) else Decimal("1")
 
 
 def to_grant_ccy(amount_ils, c, s, p):
-    return (amount_ils * (1 + margin_for(c, s, p)) / s.rate / vat_divisor(s.grant, c.category)).quantize(Q)
+    return (amount_ils * (1 + margin_for(c, s, p)) / s.rate * charge_factor(c, s.grant)).quantize(Q)
 
 
 def collect(today, sap_as_of, p):
@@ -361,7 +365,7 @@ def collect(today, sap_as_of, p):
         if o.id in already:
             buckets["skipped"].append((o, "כבר אושרה כאן"))
             continue
-        if not o.amount_est:
+        if order_amount(o) is None:
             buckets["needs_amount"].append(o)
             continue
         try:
@@ -437,9 +441,8 @@ def explain(c, s, avail_cat, urgency, amount_grant, cat_names=None, ranked=None,
     if c.currency != cur:
         pct = round(float(settings.RESOLVE_DEFAULTS["fx_margin"]) * 100, 1)
         warn.append(f"ההזמנה ב-{c.currency} והמענק ב-{cur}. מוסיפים {pct:g}% כגיבוי למקרה שהשער יזוז.")
-    if vat_divisor(g, c.category) != 1:
-        warn.append(f"המענק לא משלם מע״מ, ולכן יורד ממנו המחיר לפני מע״מ (מחולק ב-"
-                    f"{settings.RESOLVE_DEFAULTS['vat_rate']:g}).")
+    if charge_factor(c, g) != 1:
+        warn.append("המענק לא משלם מע״מ, ולכן יורד ממנו הסכום לפני מע״מ (מההצעה).")
     if manual:
         warn.append("בחרת מענק אחר מההמלצה.")
     if base > 0 and left / base < Decimal("0.05"):
@@ -521,7 +524,7 @@ def compute(today=None, sap_as_of=None, **overrides):
         for o in usable:
             num = o.state.grant.number
             x[i, num] = A[i] * pulp.LpVariable(f"y_{i}_{num}", cat="Binary")
-            k[i, num] = float((1 + margin_for(c, o.state, p)) / o.state.rate / vat_divisor(o.state.grant, c.category))
+            k[i, num] = float((1 + margin_for(c, o.state, p)) / o.state.rate * charge_factor(c, o.state.grant))
             costs[i, num] = o.cost
     prob += pulp.lpSum(costs[key] * x[key] for key in x) + pulp.lpSum(BIG * u[i] for i in u)
     for i, c in enumerate(cands):
@@ -633,7 +636,7 @@ def approve_plans(decisions, user="", today=None, edited=None):
             if oid in approved_already:
                 errors.append(f"{name}: כבר אושרה")
                 continue
-            if not o.amount_est:
+            if order_amount(o) is None:
                 errors.append(f"{name}: אין סכום")
                 continue
             if not num:
@@ -652,7 +655,7 @@ def approve_plans(decisions, user="", today=None, edited=None):
             if not ok:
                 errors.append(f"{name}: המענק {num} אינו כשיר — {reason}")
                 continue
-            ils = (o.amount_est * c.rate).quantize(Q)
+            ils = (c.amount * c.rate).quantize(Q)
             amt_g = to_grant_ccy(ils, c, s, p)
             if s.total - used_total[num] - amt_g < -TOL:
                 errors.append(f"{name}: חריגה מהיתרה של {num} — זמין {s.total - used_total[num]:,.2f}, "
@@ -669,9 +672,9 @@ def approve_plans(decisions, user="", today=None, edited=None):
             used_total[num] += amt_g
             used_cat[num, c.category] += amt_g
             new_allocs.append(Allocation(
-                order=o, grant=s.grant, category_id=c.category, amount_orig=o.amount_est.quantize(Q),
+                order=o, grant=s.grant, category_id=c.category, amount_orig=c.amount.quantize(Q),
                 currency_orig=c.currency, amount_ils=ils, amount_grant_ccy=amt_g,
-                fx_rate=(c.rate * (1 + margin_for(c, s, p)) / s.rate / vat_divisor(s.grant, c.category)).quantize(R6), fx_date=today,
+                fx_rate=(c.rate * (1 + margin_for(c, s, p)) / s.rate * charge_factor(c, s.grant)).quantize(R6), fx_date=today,
                 status=Allocation.Status.APPROVED, decided_by=user, decided_at=timezone.now(),
                 reason=reason_txt))
         if errors:

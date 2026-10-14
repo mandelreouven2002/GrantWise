@@ -102,8 +102,7 @@ FX_REFRESH_MINUTES = int(os.environ.get("FX_REFRESH_MINUTES", "60"))
 RESOLVE_DEFAULTS = {
     "lookback_days": 180,     # ignore stale 'ordered' rows older than this
     "fx_margin": 0.03,        # safety margin when order currency != grant currency
-    "vat_rate": 1.18,         # a grant that does not pay VAT is charged the price divided by this…
-    "vat_free_categories": ("SALARY", "SERVICE"),   # …except for these: their price carries no VAT, it stays as is
+    "vat_rate": 1.18,         # materials: used only when a quote has just one of its two totals (with / without VAT)
     "urgency_halflife_days": 90,
     "w_urgency": 0.6,
     "w_reserve": 0.5,
