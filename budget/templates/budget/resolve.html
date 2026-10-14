@@ -36,101 +36,100 @@
   כל בקשה ממומנת <b>ממענק אחד</b>, כמו שרושמים GRANT_ID אחד ב-LabSuit. אם אין מענק אחד שמכסה את כל הסכום, הבקשה מסומנת "אין מקור מספיק". בכל שורה, "פירוט" מציג את כל המענקים הכשירים לפי סדר העדיפות ולמה האחרים נפסלו.</p>
 </details>
 
-<h2>סיכום לפי מענק <span class="muted" style="font-weight:400">— מתעדכן לפי הבחירות שלך (רק בקשות מסומנות)</span></h2>
-<div class="tbl-wrap" style="max-height:none;margin-bottom:6px"><table id="summary">
-  <thead><tr><th>מענק</th><th>מסתיים</th><th class="num">בקשות</th><th class="num">זמין עכשיו</th><th class="num">לקחת</th><th class="num">יישאר</th><th class="num">≈ ₪</th><th>בדיקה</th></tr></thead>
-  <tbody></tbody>
-</table></div>
-
 <form method="post" action="{% url 'resolve_approve' %}" id="approve-form" autocomplete="off">{% csrf_token %}
 <input type="hidden" name="next" value="{{ request.get_full_path }}">
-<p class="toolbar">
-  <button class="btn" id="approve-btn">אישור המסומנות</button>
-  <button type="button" class="btn ghost" id="refresh-btn" title="מחזיר להמלצה המיטבית ומבטל עריכות">↻ רענון המלצה</button>
-  <span class="muted" id="approve-hint"></span>
-</p>
 
-<h2>בקשות</h2>
-<div class="tbl-wrap" data-table="orders" style="max-height:none">
+<style>.rem .neg{color:var(--bad)} #plans details summary{cursor:pointer}</style>
+<h2>בקשות <span class="muted" style="font-weight:400">— מסמנים מה לאשר. ההסבר, הסיבה וההשוואה בהרחבה (▸) בכל שורה</span></h2>
+<div class="tbl-wrap" style="max-height:none">
 <table id="plans">
   <thead><tr>
-    <th></th><th>פריט</th><th>LabSuit</th><th class="num">סכום</th><th>מטבע</th><th>סעיף</th><th>פרויקט</th>
-    <th style="min-width:380px">מענק מומלץ (ניתן לשינוי)</th><th>מצב</th>
+    <th></th><th>פריט</th><th>פרויקט</th><th class="num">סכום</th><th>מטבע</th><th>סעיף</th>
+    <th style="min-width:300px">מענק מומלץ</th><th class="num" style="min-width:120px">משלמים</th><th class="num" style="min-width:140px">יישאר</th><th>מצב</th>
   </tr></thead>
   <tbody>
   {% for r in rows %}
-  <tr data-pk="{{ r.order.id }}" data-reload data-state="{{ r.state }}" class="plan-row">
-    <td class="chk">{% if r.state == "ok" %}<input type="checkbox" class="pick" name="order" value="{{ r.order.id }}" checked>
+  <tr data-pk="{{ r.order.id }}" data-state="{{ r.state }}" class="plan-row">
+    <td class="chk">{% if r.state == "ok" %}<input type="checkbox" class="pick" name="order" value="{{ r.order.id }}" checked aria-label="אישור: {{ r.order.item_name|truncatechars:40 }}">
       <input type="hidden" name="edited_{{ r.order.id }}" value="0" class="edited-flag">{% endif %}</td>
     <td class="ro" style="white-space:normal;min-width:220px"><b>{{ r.order.item_name|truncatechars:70 }}</b>
       <div class="reason">{{ r.order.supplier }} · {{ r.order.requested_by }} · {{ r.order.date_requested|date:"d/m/Y" }}</div></td>
-    <td class="ro">{{ r.order.grant_label|default:"—" }}</td>
-    {% with c=r.cells.amount_est %}{% include "budget/_cell.html" %}{% endwith %}
-    {% with c=r.cells.amount_currency %}{% include "budget/_cell.html" %}{% endwith %}
-    {% with c=r.cells.category %}{% include "budget/_cell.html" %}{% endwith %}
-    {% with c=r.cells.project %}{% include "budget/_cell.html" %}{% endwith %}
+    <td class="ro">{{ r.order.project_text|default:r.order.grant_label|default:"—" }}</td>
+    <td class="ro num">{{ r.amt|money:2|default:"—" }}</td>
+    <td class="ro">{{ r.amt_cur }}</td>
+    <td class="ro">{{ r.order.category.name_he|default:"—" }}</td>
     <td class="ro" style="white-space:normal">
       {% if r.state == "noamount" %}
-        <span class="tag warn">חסר סכום</span> <span class="reason">הזינו סכום בעמודת "סכום" — ההמלצה תחושב מיד</span>
+        <span class="tag warn">חסר סכום</span> <span class="reason">יש להזין סכום ב<a href="{% if r.is_material %}{% url 'orders' %}{% else %}{% url 'other' %}{% endif %}?noamount=1">{% if r.is_material %}הזמנות חומרים{% else %}אחר{% endif %}</a>, וההמלצה תחושב מיד</span>
       {% elif r.state == "skipped" %}
         <span class="tag warn">לא בחישוב</span> <span class="reason">{{ r.note }}</span>
       {% elif r.state == "standing" %}
         <span class="tag info">הזמנה עומדת</span> <span class="reason">{{ r.note }}</span>
       {% elif not r.options %}
         <span class="tag bad">אין מענק כשיר</span>
-        <div class="reason">{% for num, why in r.why_not %}{{ num }}: {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>
+        <details style="margin-top:6px"><summary class="muted">למה</summary>
+          <div class="reason">{% for num, why in r.why_not %}{{ num }}: {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div></details>
       {% else %}
         {% if r.state == "unfunded" %}
-        <span class="tag bad">אין מקור מספיק</span> <span class="reason">{{ r.lines.0.reason_main|linebreaksbr }}</span>
+        <span class="tag bad">אין מקור מספיק</span>
         {% else %}
-        <div class="lines" data-order="{{ r.order.id }}">
-          <div class="line">
-            <select class="f lg" name="g_{{ r.order.id }}">{% for op in r.options %}<option value="{{ op.num }}" {% if op.num == r.lines.0.grant.number %}selected{% endif %}>{{ op.num }} · {{ op.currency }}{% if op.rank == 1 %} ★{% endif %}</option>{% endfor %}</select>
-            <span class="muted lsponsor">{{ r.lines.0.grant.sponsor|truncatechars:34 }}</span>
-            <span class="muted lconv"></span>
-            <div class="reason lreason">{{ r.lines.0.reason_main|linebreaksbr }}</div>
-          </div>
-        </div>
+        <div class="lines" data-order="{{ r.order.id }}"><div class="line">
+          <select class="f lg" name="g_{{ r.order.id }}">{% for op in r.options %}<option value="{{ op.num }}" {% if op.num == r.lines.0.grant.number %}selected{% endif %}>{{ op.num }}{% if op.label %} · {{ op.label }}{% endif %} · {{ op.currency }}{% if op.rank == 1 %} ★{% endif %}</option>{% endfor %}</select>
         {% endif %}
-        <details style="margin-top:6px"><summary class="muted">פירוט והשוואה: {{ r.options|length }} מענקים כשירים{% if r.why_not %}, {{ r.why_not|length }} נפסלו{% endif %}</summary>
-          {% if r.lines.0.reason_compare %}<div class="reason" style="margin-top:6px">{{ r.lines.0.reason_compare }}</div>{% endif %}
-          <table style="margin-top:6px">
-            <tr><th>#</th><th>מענק</th><th>מסתיים</th><th class="num">זמין בסעיף</th><th class="num">זמין כולל</th><th>הערות</th></tr>
-            {% for op in r.options %}<tr><td class="ro">{{ op.rank }}</td><td class="ro"><b>{{ op.num }}</b> <span class="muted">{{ op.label }}</span></td>
-              <td class="ro">{{ op.end|date:"d/m/Y" }}{% if op.days != None %} ({{ op.days }} ימים){% endif %}</td>
-              <td class="ro num">{% if op.pooled %}<span class="muted">מאגר</span>{% else %}{{ op.avail_cat|money:2 }} {{ op.currency }}{% endif %}</td>
-              <td class="ro num">{{ op.total|money:2 }} {{ op.currency }}</td>
-              <td class="ro reason">{% if op.urgent %}בסכנת אי-ניצול · {% endif %}{% if op.reserve %}רזרבה · {% endif %}{% if op.priority %}עדיפות {{ op.priority }}{% endif %}</td></tr>{% endfor %}
-          </table>
-          {% if r.why_not %}<div class="reason" style="margin-top:6px"><b>לא כשירים:</b> {% for num, why in r.why_not %}{{ num }} — {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>{% endif %}
-        </details>
+          <details class="why" style="margin-top:6px"><summary class="muted">פירוט והסבר · {{ r.options|length }} מענקים כשירים{% if r.why_not %}, {{ r.why_not|length }} נפסלו{% endif %}</summary>
+            <div class="reason lreason" style="margin-top:6px">{{ r.lines.0.reason_main|linebreaksbr }}</div>
+            {% if r.lines.0.reason_compare %}<div class="reason" style="margin-top:6px">{{ r.lines.0.reason_compare }}</div>{% endif %}
+            <table style="margin-top:6px">
+              <tr><th>#</th><th>מענק</th><th>מסתיים</th><th class="num">זמין בסעיף</th><th class="num">זמין כולל</th><th>הערות</th></tr>
+              {% for op in r.options %}<tr><td class="ro">{{ op.rank }}</td><td class="ro"><b>{{ op.num }}</b> <span class="muted">{{ op.label }}</span></td>
+                <td class="ro">{{ op.end|date:"d/m/Y" }}{% if op.days != None %} ({{ op.days }} ימים){% endif %}</td>
+                <td class="ro num">{% if op.pooled %}<span class="muted">מאגר</span>{% else %}{{ op.avail_cat|money:2 }} {{ op.currency }}{% endif %}</td>
+                <td class="ro num">{{ op.total|money:2 }} {{ op.currency }}</td>
+                <td class="ro reason">{% if op.urgent %}בסכנת אי-ניצול · {% endif %}{% if op.reserve %}רזרבה · {% endif %}{% if op.priority %}עדיפות {{ op.priority }}{% endif %}</td></tr>{% endfor %}
+            </table>
+            {% if r.why_not %}<div class="reason" style="margin-top:6px"><b>לא כשירים:</b> {% for num, why in r.why_not %}{{ num }} — {{ why }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>{% endif %}
+          </details>
+        {% if r.state != "unfunded" %}</div></div>{% endif %}
       {% endif %}
     </td>
+    <td class="ro num pay">{% if r.pay is not None %}<b>{{ r.pay|money:2 }}</b> {{ r.rem_cur }}{% endif %}</td>
+    <td class="ro num rem" style="white-space:normal">{% if r.rem is not None %}<b class="{% if r.rem < 0 %}neg{% endif %}">{{ r.rem|money:2 }}</b> {{ r.rem_cur }}<div class="reason">{{ r.rem_where }}</div>{% endif %}</td>
     <td class="ro status" style="white-space:normal;min-width:110px">{% if r.state == "unfunded" %}<span class="tag bad">ללא מקור</span>{% endif %}</td>
   </tr>
   {% empty %}
-  <tr><td class="ro muted" colspan="9">אין כרגע בקשות פתוחות ב"הזמנות ודרישות".</td></tr>
+  <tr><td class="ro muted" colspan="10">אין כרגע בקשות פתוחות ב"הזמנות חומרים" וב"אחר".</td></tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
 </form>
 
+<h2>סיכום לפי מענק <span class="muted" style="font-weight:400">— מתעדכן לפי הבקשות המסומנות</span></h2>
+<div class="tbl-wrap" style="max-height:none;margin-bottom:6px"><table id="summary">
+  <thead><tr><th>מענק</th><th>מסתיים</th><th class="num">בקשות</th><th class="num">זמין עכשיו</th><th class="num">לקחת</th><th class="num">יישאר</th><th class="num">≈ ₪</th><th>בדיקה</th></tr></thead>
+  <tbody></tbody>
+</table></div>
+<p class="toolbar">
+  <button class="btn" id="approve-btn" form="approve-form">אישור המסומנות</button>
+  <button type="button" class="btn ghost" id="refresh-btn" title="מחזיר להמלצה המיטבית ומבטל שינויים">↻ רענון המלצה</button>
+  <span class="muted" id="approve-hint"></span>
+</p>
+
 {% endif %}
 
-<h2 id="bin">♻ סל מחזור <span class="muted" style="font-weight:400">— אושרו וממתינים לעדכון במערכות המעבדה ({{ bin|length }})</span> <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הזמנות שאושרו כאן יוצאות מ"הזמנות ודרישות" ומחכות בסל הזה, עם הנימוק של ההמלצה.<br><br>"♻ מחזור" מבטל את האישור ומחזיר את ההזמנה ל"הזמנות ודרישות" כבקשה פתוחה: ההמלצה תחושב מחדש לפי השערים והיתרות של היום (כולל מטבע ששערו השתנה).<br><br>"עודכן במערכות המעבדה" = עדכנת את ה-GRANT_ID ב-LabSuit או את ההזמנה ב-SAP. ההזמנה יוצאת מהסל ולא תופיע יותר בהזמנות ובהמלצות, והסכום שלה ממשיך לרדת מהמענק (לא חוזר אליו). הוא נספר עד שדוח SAP יכסה את ההזמנה: דוח שתאריכו מאוחר מתאריך ההזמנה ב-LabSuit, או מהיום שסימנת. SAP מייצא רק יתרות, לכן זו הסקה לפי תאריכים והזמין הוא הערכה שמרנית.</span></span></h2>
+<h2 id="bin">♻ סל מחזור <span class="muted" style="font-weight:400">— אושרו וממתינים לעדכון במערכות המעבדה ({{ bin|length }})</span> <span class="info" tabindex="0" aria-label="מידע">i<span class="tip">הזמנות שאושרו כאן יוצאות מדפי ההזמנות ומחכות בסל הזה, עם הנימוק של ההמלצה.<br><br>"♻ מחזור" מבטל את האישור ומחזיר את ההזמנה לדף ההזמנות המתאים (חומרים / אחר) כבקשה פתוחה: ההמלצה תחושב מחדש לפי השערים והיתרות של היום (כולל מטבע ששערו השתנה).<br><br>"עודכן במערכות המעבדה" = עדכנת את ה-GRANT_ID ב-LabSuit או את ההזמנה ב-SAP. ההזמנה יוצאת מהסל ולא תופיע יותר בהזמנות ובהמלצות, והסכום שלה ממשיך לרדת מהמענק (לא חוזר אליו). הוא נספר עד שדוח SAP יכסה את ההזמנה: דוח שתאריכו מאוחר מתאריך ההזמנה ב-LabSuit, או מהיום שסימנת. SAP מייצא רק יתרות, לכן זו הסקה לפי תאריכים והזמין הוא הערכה שמרנית.</span></span></h2>
 <div class="tbl-wrap"><table>
   <tr><th>פריט</th><th>מימון שאושר</th><th>נימוק ההמלצה</th><th class="num">≈ ₪</th><th>אושר</th><th>עדכון</th><th></th></tr>
   {% for g in bin %}<tr>
     <td class="ro" style="white-space:normal;min-width:200px"><b>{{ g.order.item_name|truncatechars:60 }}</b>
       <div class="reason">{{ g.order.supplier }} · {{ g.order.requested_by }} · {{ g.order.date_requested|date:"d/m/Y" }}</div>
-      <div class="reason">{{ g.order.amount_est|money:2 }} {{ g.order.amount_currency }}</div></td>
+      <div class="reason">{{ g.amt|money:2 }} {{ g.amt_cur }}</div></td>
     <td class="ro" style="white-space:normal">{% for a in g.lines %}<div><b>{{ a.grant_id }}</b> · {{ a.amount_grant_ccy|money:2 }} {{ a.grant.currency }}{% if g.lines|length > 1 %} <span class="muted">({{ a.amount_orig|money:2 }} {{ a.currency_orig }})</span>{% endif %}</div>{% endfor %}</td>
     <td class="ro reason" style="white-space:normal;min-width:260px">{% for a in g.lines %}<div>{% if g.lines|length > 1 %}<b>{{ a.grant_id }}:</b> {% endif %}{{ a.reason|default:"—"|linebreaksbr }}</div>{% endfor %}</td>
     <td class="ro num">{{ g.then|money:0 }}{% if g.drift %}<div class="reason"><span class="tag warn">השתנה</span> היום ≈ {{ g.now|money:0 }}</div>{% endif %}</td>
     <td class="ro">{{ g.decided_by }} · {{ g.decided_at|date:"d/m/Y H:i" }}</td>
     <td class="ro"><form method="post" action="{% url 'allocation_lab_updated' g.pk %}" class="inline" onsubmit="return confirm('ההזמנה תוסר מהסל ולא תופיע יותר במערכת. הסכום יישאר מנוכה מהמענק. להמשיך?')">{% csrf_token %}<button class="btn small ghost">עודכן במערכות המעבדה</button></form></td>
-    <td><form method="post" action="{% url 'allocation_recycle' g.pk %}" class="inline">{% csrf_token %}<button class="btn small" title="ביטול האישור והחזרה להזמנות ודרישות">♻ מחזור</button></form></td></tr>
+    <td><form method="post" action="{% url 'allocation_recycle' g.pk %}" class="inline">{% csrf_token %}<button class="btn small" title="ביטול האישור והחזרה לדף ההזמנות המתאים">♻ מחזור</button></form></td></tr>
   {% empty %}<tr><td class="ro muted" colspan="7">הסל ריק — הזמנות שיאושרו יופיעו כאן.</td></tr>{% endfor %}
 </table></div>
 
@@ -144,7 +143,8 @@
 
   function toGrant(o, g, amount){                 // order currency -> grant currency incl. FX margin
     const m = o.cur !== g.cur ? D.margin : 0;
-    return amount * o.rate * (1 + m) / g.rate;
+    const vat = (o.mat && !g.vatReq) ? o.ratio : 1;  // materials from a grant that pays no VAT: the price before VAT
+    return amount * o.rate * (1 + m) / g.rate * vat;
   }
 
   function recalc(){
@@ -155,11 +155,16 @@
       const pick = tr.querySelector('.pick'), sel = tr.querySelector('.lg');
       if(!o || !sel){ return; }                       // no recommendation for this row
       const n = sel.value, g = D.grants[n];
-      const conv = tr.querySelector('.lconv'), sp = tr.querySelector('.lsponsor');
-      if(sp && g){ sp.textContent = g.label; }
       if(g){
         const ag = toGrant(o, g, o.amount);           // the whole order is funded from this one grant
-        conv.textContent = o.cur !== g.cur ? `= ${fmt(ag)} ${g.cur}` : '';
+        const pay = tr.querySelector('.pay');
+        if(pay) pay.innerHTML = `<b>${fmt(ag)}</b> ${g.cur}`;      // what comes off the grant (FX margin, VAT)
+        const rem = tr.querySelector('.rem');
+        if(rem){
+          const cap = g.pooled ? g.total : (g.cats[o.cat] || 0) + (g.extra[o.cat] || 0);
+          const left = cap - ag;
+          rem.innerHTML = `<b class="${left < -TOL ? 'neg' : ''}">${fmt(left)}</b> ${g.cur}<div class="reason">${g.pooled ? 'מכלל המאגר' : 'בסעיף ' + (D.catNames[o.cat] || o.cat)}</div>`;
+        }
         if(pick && pick.checked){
           useT[n] = (useT[n] || 0) + ag; useC[n + '|' + o.cat] = (useC[n + '|' + o.cat] || 0) + ag;
           count[n] = (count[n] || new Set()); count[n].add(oid);

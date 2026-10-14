@@ -10,7 +10,7 @@ from decimal import Decimal
 from django.db import transaction
 
 from ..models import (Allocation, BudgetReportLine, FundingAlias, Grant, GrantRule, ImportBatch, InventoryItem,
-                      OrderRequest, ProjectGrant, Reservation)
+                      OrderRequest, Reservation)
 
 LIST_CAP = 200          # rows listed per section; counts are always complete
 
@@ -108,7 +108,7 @@ SNAPSHOTS = {
 def preserved_orders(keys):
     qs = OrderRequest.objects.filter(source="labsuit", natural_key__in=keys)
     out = [
-        ("הזמנות עם פרויקט שהוגדר ב-LabFund", qs.exclude(project__isnull=True).count()),
+        ("הזמנות עם פרויקט שהוקלד ב-LabFund", qs.exclude(project_text="").count()),
         ("הזמנות עם סכום שהוזן ידנית", qs.filter(amount_source=OrderRequest.AmountSource.MANUAL).count()),
         ("הזמנות עם הערות מעבדה", qs.exclude(lab_notes="").count()),
         ("הזמנות עם החלטת מימון שאושרה", qs.filter(allocations__status=Allocation.Status.APPROVED)
@@ -126,7 +126,6 @@ def preserved_grants(keys):
         ("מענקים עם הערות", qs.exclude(notes="").count()),
         ("שריונים", Reservation.objects.filter(grant__in=qs).count()),
         ("כללי סעיף", GrantRule.objects.filter(grant__in=qs).count()),
-        ("קישורי פרויקט", ProjectGrant.objects.filter(grant__in=qs).count()),
     ]
     return [x for x in out if x[1]]
 

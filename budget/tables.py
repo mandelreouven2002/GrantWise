@@ -12,9 +12,10 @@ from decimal import Decimal, InvalidOperation
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db.models import Q
+from django.db import transaction
 
 from .models import (BudgetCategory, BudgetReportLine, FxRate, Grant, GrantLine,
-                     GrantRule, ImportBatch, InventoryItem, OrderRequest, Project, ProjectGrant,
+                     GrantRule, ImportBatch, InventoryItem, OrderRequest,
                      Reservation, TrackedCurrency)
 
 
@@ -22,7 +23,7 @@ from .models import (BudgetCategory, BudgetReportLine, FxRate, Grant, GrantLine,
 class Col:
     field: str
     label: str
-    kind: str = "text"      # text|num|money|int|date|bool|select|currency|category|project|grant|ro|calc|line
+    kind: str = "text"      # text|suggest|num|money|int|date|bool|select|currency|category|grant|ro|calc|line
     choices: list | None = None
     width: str = ""
     required: bool = False  # for the add-row form
@@ -59,7 +60,7 @@ def _grant_choices():
     return [(g.number, f"{g.number} · {g.currency}") for g in Grant.objects.order_by("number")]
 
 
-FK_KINDS = {"category", "grant", "project"}   # stored as <field>_id, edited with a select
+FK_KINDS = {"category", "grant"}   # stored as <field>_id, edited with a select
 
 
 def _currency_choices():
@@ -68,12 +69,12 @@ def _currency_choices():
                                                            .values_list("code", flat=True)]
 
 
-def _project_choices():
-    return [("", "-")] + [(str(p.pk), p.name) for p in Project.objects.filter(is_active=True).order_by("name")]
-
-
+# every budget category of the SAP grants file, in its order (the table hides the ones nobody has)
 LINE_CATS = [("SALARY", "שכר"), ("MATERIAL", "חומרים"), ("EQUIPMENT", "ציוד"), ("SERVICE", "שירותים"),
-             ("GENERAL", "כללי")]
+             ("TRAVEL_EXT", "נסיעות לחו״ל"), ("TRAVEL_INT", "נסיעות בארץ"), ("BOOKS", "ספרים"),
+             ("CONFERENCE", "אירוח וכנסים"), ("OFFICE", "משרדיות"), ("PUBLICATION", "פרסומים"),
+             ("REPORTING", "דיווח"), ("OVERHEAD", "תקורה"), ("SELF", "עצמי"), ("OTHER", "אחר"),
+             ("GENERAL", "כללי (מאגר)")]
 STATUSES = [(s, s) for s in ["requested", "approved", "ordered", "received", "canceled"]]
 
 TABLES = {t.key: t for t in [
@@ -81,6 +82,7 @@ TABLES = {t.key: t for t in [
           add=["number", "sponsor", "currency", "start_date", "end_date", "balance_total"],
           cols=[Col("number", "מענק", "ro", required=True), Col("sponsor", "גורם מממן", width="w-m"),
                 Col("currency", "מטבע", "currency", required=True),
+                Col("vat_required", "מע״מ", "bool"),
                 Col("end_date", "סיום", "date", required=True), Col("days", "ימים לסיום", "calc"),
                 *[Col(f"line:{c}", n, "line") for c, n in LINE_CATS],
                 Col("balance_total", "יתרה כוללת", "money"), Col("pending", "ממתין", "calc"),
@@ -90,16 +92,34 @@ TABLES = {t.key: t for t in [
                 Col("order_cutoff_days", "ימי חסימה לפני סיום", "int", hidden=True),
                 Col("is_active", "פעיל", "bool", hidden=True),
                 Col("start_date", "התחלה", "date", hidden=True)]),
-    Table("orders", OrderRequest, "הזמנות ודרישות", source="labsuit_orders",
-          search=["item_name", "catalog_number", "supplier", "po_number", "grant_label", "requested_by"],
+    # Materials: the two quoted totals (with / without VAT) are the amount; the LabSuit update lives here.
+    Table("orders", OrderRequest, "הזמנות חומרים", source="labsuit_orders",
+          search=["item_name", "catalog_number", "supplier", "po_number", "grant_label", "project_text", "requested_by"],
+          add=["item_name", "requested_by", "supplier", "catalog_number", "quantity", "quoted_total_incl_vat",
+               "quoted_total_excl_vat", "quoted_currency", "project_text"],
+          deletable=True,
+          cols=[Col("date_requested", "תאריך", "date"), Col("item_name", "פריט", width="w-l", required=True),
+                Col("quoted_total_incl_vat", "סה״כ כולל מע״מ", "quote_money"),
+                Col("quoted_total_excl_vat", "סה״כ לפני מע״מ", "quote_money"),
+                Col("quoted_currency", "מטבע", "currency"),
+                Col("status", "סטטוס", "select", STATUSES), Col("project_text", "פרויקט", "suggest", width="w-m"),
+                Col("category", "סעיף", "category"),
+                Col("requested_by", "מבקש/ת", width="w-m"),
+                Col("supplier", "ספק", width="w-m"), Col("po_number", "הזמנת רכש"), Col("quantity", "כמות", "num"),
+                Col("quote_pdf", "הצעת מחיר", "calc"),
+                Col("extraction_status", "מצב חילוץ", "ro", hidden=True),
+                Col("lab_notes", "הערות", width="w-l")]),
+    # Everything that is not a material: one typed amount, VAT plays no role.
+    Table("orders_other", OrderRequest, "אחר",
+          search=["item_name", "catalog_number", "supplier", "po_number", "grant_label", "project_text", "requested_by"],
           add=["item_name", "requested_by", "supplier", "catalog_number", "quantity", "amount_est",
-               "amount_currency", "category", "grant_label"],
+               "amount_currency", "category", "project_text"],
           deletable=True,
           cols=[Col("date_requested", "תאריך", "date"), Col("item_name", "פריט", width="w-l", required=True),
                 Col("amount_est", "סכום", "money"), Col("amount_currency", "מטבע", "currency"),
-                Col("status", "סטטוס", "select", STATUSES), Col("grant_label", "GRANT_ID", width="w-m"),
+                Col("status", "סטטוס", "select", STATUSES), Col("project_text", "פרויקט", "suggest", width="w-m"),
                 Col("category", "סעיף", "category"),
-                Col("project", "פרויקט", "project"), Col("requested_by", "מבקש/ת", width="w-m"),
+                Col("requested_by", "מבקש/ת", width="w-m"),
                 Col("supplier", "ספק", width="w-m"), Col("po_number", "הזמנת רכש"), Col("quantity", "כמות", "num"),
                 Col("amount_source", "מקור סכום", "ro"), Col("quote_pdf", "הצעת מחיר", "calc"),
                 Col("lab_notes", "הערות", width="w-l")]),
@@ -107,28 +127,11 @@ TABLES = {t.key: t for t in [
           add=["date", "currency", "rate_to_ils"],
           cols=[Col("date", "תאריך", "date", required=True), Col("currency", "מטבע", "currency", required=True),
                 Col("rate_to_ils", "₪ ליחידה", "num", required=True), Col("source", "מקור", "ro")]),
-    Table("reservations", Reservation, "שריונים", deletable=True,
-          add=["category", "amount", "until", "note"],
-          cols=[Col("category", "סעיף", "category", required=True), Col("amount", "סכום (במטבע המענק)", "money", required=True),
-                Col("until", "עד", "date"), Col("note", "הערה", width="w-l")]),
-    Table("rules", GrantRule, "כללי מענק", deletable=True,
-          add=["category", "allowed", "extra_allowance", "note"],
-          cols=[Col("category", "סעיף", "category", required=True), Col("allowed", "מותר", "bool"),
-                Col("extra_allowance", "חריגה מותרת", "money"), Col("note", "הערה", width="w-l")]),
-    Table("projectgrants", ProjectGrant, "פרויקטים מורשים", deletable=True,
-          add=["project", "weight"],
-          cols=[Col("project", "פרויקט", "project", required=True), Col("weight", "העדפה", "int")]),
-    # ---- settings
     Table("currencies", TrackedCurrency, "מטבעות", per_page=200,
           add=["code", "name_he"],
           cols=[Col("code", "קוד", "ro", required=True), Col("name_he", "שם"), Col("rate", "₪ ליחידה", "calc"),
                 Col("rate_date", "תאריך השער", "calc"), Col("source", "מקור", "ro"),
                 Col("is_active", "פעיל", "bool")]),
-    Table("projects", Project, "פרויקטים", deletable=True, per_page=500,
-          add=["name", "parent", "owner"],
-          cols=[Col("name", "שם", width="w-l", required=True), Col("parent", "פרויקט-על", "project"),
-                Col("owner", "אחראי/ת", width="w-m"), Col("is_active", "פעיל", "bool"),
-                Col("orders", "הזמנות", "calc")]),
     Table("users", User, "משתמשים", per_page=200,
           add=["username", "password", "first_name", "email", "is_superuser"],
           add_only=[Col("password", "סיסמה", required=True)],
@@ -155,6 +158,9 @@ def cell(col, obj, extra=None):
     extra = extra or {}
     if col.kind == "calc":
         return dict(col=col, value=extra.get(col.field, ""), ro=True)
+    if col.kind == "suggest":      # free text typed by the lab, else the request's GRANT_ID from LabSuit
+        v = getattr(obj, col.field) or getattr(obj, "grant_label", "")
+        return dict(col=col, value=v or "")
     if col.kind == "line":
         v = extra.get(col.field)
         return dict(col=col, value=fmt_num(v), neg=v is not None and v < 0,
@@ -163,6 +169,29 @@ def cell(col, obj, extra=None):
         v = getattr(obj, f"{col.field}_id")
         return dict(col=col, value="" if v is None else str(v))
     v = getattr(obj, col.field)
+    if col.field == "quoted_currency":      # shows the currency the model really uses for this request
+        from .amounts import quote_currency
+        return dict(col=col, value=quote_currency(obj) or obj.amount_currency or "ILS")
+    if col.kind == "quote_money":
+        evidence = obj.extraction_evidence.get("values", {}).get(col.field, {})
+        status = obj.extraction_status
+        # a small marker (its text on hover) instead of an expandable part: only when the number needs a word
+        if obj.quoted_manually_corrected:
+            mark, text = "manual", "נכתב ידנית"
+        elif not status:
+            mark, text = "none", "טרם חולץ"
+        elif v is None:
+            mark, text = "miss", "לא נמצא בחילוץ"
+        elif status == "ambiguous":
+            mark, text = "miss", "דורש בדיקה"
+        elif status == "failed":
+            mark, text = "miss", "החילוץ נכשל"
+        else:
+            mark, text = "", ""
+        tip = " · ".join(x for x in (text, f"עמוד {evidence['page']}" if evidence.get("page") else "",
+                                     evidence.get("text", "")) if x)
+        return dict(col=col, value=fmt_num(v), mark=mark, mark_text=text, tip=tip,
+                    mark_glyph={"manual": "✎", "none": "·", "miss": "!"}.get(mark, ""))
     if col.kind == "ro":
         disp = obj._get_FIELD_display(obj._meta.get_field(col.field)) if getattr(
             obj._meta.get_field(col.field), "choices", None) else v
@@ -181,8 +210,6 @@ def choices_for(col):
         return [("", "—")] + _cat_choices()
     if col.kind == "grant":
         return [("", "—")] + _grant_choices()
-    if col.kind == "project":
-        return _project_choices()
     if col.kind == "currency":
         return _currency_choices()
     if col.choices:
@@ -206,6 +233,15 @@ def _to_python(obj, name, raw):
 
 
 def set_value(table, obj, name, raw):
+    if isinstance(obj, OrderRequest) and name in (
+            "quoted_total_excl_vat", "quoted_total_incl_vat", "quoted_currency"):
+        with transaction.atomic():
+            obj = OrderRequest.objects.select_for_update().get(pk=obj.pk)
+            return _set_value(table, obj, name, raw)
+    return _set_value(table, obj, name, raw)
+
+
+def _set_value(table, obj, name, raw):
     """Apply one edit. Returns the saved object. Raises ValidationError with a Hebrew message."""
     col = table.col(name)
     if col is None or col.kind in ("ro", "calc"):
@@ -219,6 +255,8 @@ def set_value(table, obj, name, raw):
             setattr(obj, f"{name}_id", _fk_value(col, raw))
         elif col.kind == "currency":
             setattr(obj, name, _to_python(obj, name, (raw or "").upper()))
+        elif isinstance(obj, OrderRequest) and name == "quoted_currency":
+            setattr(obj, name, _to_python(obj, name, (raw or "").upper()))
         else:
             setattr(obj, name, _to_python(obj, name, raw))
     except (InvalidOperation, ValueError):
@@ -227,10 +265,19 @@ def set_value(table, obj, name, raw):
     # side effects
     if isinstance(obj, OrderRequest) and name == "amount_est":
         obj.amount_source = OrderRequest.AmountSource.MANUAL if obj.amount_est else OrderRequest.AmountSource.NONE
-    if isinstance(obj, Project) and name == "parent" and obj.parent_id == obj.pk:
-        raise ValidationError("פרויקט לא יכול להיות פרויקט-העל של עצמו")
+    if isinstance(obj, OrderRequest) and name in (
+            "quoted_total_excl_vat", "quoted_total_incl_vat", "quoted_currency"):
+        if name == "quoted_currency":
+            obj.quoted_currency = obj.quoted_currency.upper()
+        if name != "quoted_currency" and getattr(obj, name) is not None and getattr(obj, name) < 0:
+            raise ValidationError("סכום הצעה אינו יכול להיות שלילי")
+        obj.quoted_manually_corrected = True
     obj.full_clean(validate_unique=False, exclude=[f.name for f in obj._meta.fields if f.name != name])
-    obj.save()
+    if isinstance(obj, OrderRequest) and name in (
+            "quoted_total_excl_vat", "quoted_total_incl_vat", "quoted_currency"):
+        obj.save(update_fields=[name, "quoted_manually_corrected"])
+    else:
+        obj.save()
     return obj
 
 
@@ -238,10 +285,6 @@ def _fk_value(col, raw):
     raw = "" if raw is None else str(raw).strip()
     if raw in ("", "-"):
         return None
-    if col.kind == "project":
-        if not Project.objects.filter(pk=raw).exists():
-            raise ValidationError("פרויקט לא קיים — אפשר להוסיף אותו בהגדרות → פרויקטים")
-        return int(raw)
     return raw
 
 
@@ -282,7 +325,7 @@ def create_row(table, data, parent=None):
         u.save()
         return u
     obj = table.model()
-    if table.key == "orders":
+    if table.key in ("orders", "orders_other"):
         obj.natural_key, obj.source = f"manual-{uuid.uuid4().hex[:16]}", "manual"
         obj.date_requested = date.today()
         obj.status = "approved"
@@ -296,7 +339,7 @@ def create_row(table, data, parent=None):
         obj.last_batch = _manual_batch(ImportBatch.Source.SAP_GRANTS)
     if table.key == "fx":
         obj.source = "manual"
-    if parent is not None:          # reservations / rules / project links belong to a grant
+    if parent is not None:          # reservations / rules belong to a grant
         obj.grant = parent
     for col in table.add_cols():
         if col.field == "number":
@@ -314,10 +357,15 @@ def create_row(table, data, parent=None):
             setattr(obj, col.field, _to_python(obj, col.field, raw))
         elif col.required:
             raise ValidationError(f"חסר: {col.label}")
-    if table.key == "orders" and obj.amount_est:
+    if table.key in ("orders", "orders_other") and obj.amount_est:
         obj.amount_source = OrderRequest.AmountSource.MANUAL
-    if table.key == "orders" and obj.category_id is None:
-        obj.category_id = "MATERIAL"
+    if table.key == "orders":
+        if obj.category_id is None:
+            obj.category_id = "MATERIAL"
+        if obj.quoted_total_incl_vat is not None or obj.quoted_total_excl_vat is not None:
+            obj.quoted_manually_corrected = True        # typed by the lab: a PDF extraction must not replace it
+    if table.key == "orders_other" and obj.category_id in (None, "MATERIAL"):
+        obj.category_id = "OTHER"
     obj.full_clean(validate_unique=table.key != "fx")
     if table.key == "fx":
         FxRate.objects.update_or_create(date=obj.date, currency=obj.currency,
