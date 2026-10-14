@@ -208,6 +208,7 @@ header form button:hover {
 /* ================= MAIN LAYOUT ================= */
 
 main {
+    position:relative;
     max-width:1640px;
     margin:0 auto;
     padding:28px 24px 60px;
@@ -826,8 +827,42 @@ tr.grp td {
     margin:0 0 14px;
 }
 
-main > .msgs ~ .orders-hero {
-    margin-top:0;
+.page-notices {
+    position:absolute;
+    top:12px;
+    inset-inline:18px;
+    z-index:40;
+    pointer-events:none;
+}
+
+.page-notices .msgs {
+    margin:0;
+}
+
+.page-notices li {
+    position:relative;
+    padding-inline-end:44px;
+    box-shadow:0 4px 16px rgba(21,46,77,.16);
+    pointer-events:auto;
+    overflow-wrap:anywhere;
+}
+
+.notice-close {
+    position:absolute;
+    inset-inline-end:8px;
+    top:6px;
+    width:30px;
+    height:30px;
+    border:0;
+    border-radius:6px;
+    background:transparent;
+    color:inherit;
+    font-size:24px;
+    cursor:pointer;
+}
+
+.notice-close:hover {
+    background:rgba(21,46,77,.08);
 }
 
 .msgs li {
@@ -1213,10 +1248,11 @@ dialog .actions {
 </header>
 
 <main>
+    <div class="page-notices" id="page-notices" aria-live="polite" aria-relevant="additions">
 
     {% if request.session.default_password %}
     <ul class="msgs">
-        <li class="error">
+        <li class="error"><button type="button" class="notice-close" aria-label="סגירת הודעה">×</button>
             נכנסת עם סיסמת ברירת המחדל.
             כדאי לשנות אותה
             <a href="/settings/?tab=users">
@@ -1229,10 +1265,12 @@ dialog .actions {
     {% if messages %}
     <ul class="msgs">
         {% for m in messages %}
-        <li class="{{ m.tags }}">{{ m }}</li>
+        <li class="{{ m.tags }}">{{ m }}<button type="button" class="notice-close" aria-label="סגירת הודעה">×</button></li>
         {% endfor %}
     </ul>
     {% endif %}
+
+    </div>
 
     {% block content %}{% endblock %}
 
@@ -1314,18 +1352,30 @@ dialog .actions {
         }
     }
 
+    document.getElementById('page-notices').addEventListener('click', e => {
+        const close = e.target.closest('.notice-close');
+        if (close) close.closest('li').remove();
+    });
+
     function alertBar(msg) {
-        let ul = document.querySelector('.msgs');
+        const notices = document.getElementById('page-notices');
+        let ul = notices.querySelector('.msgs');
 
         if (!ul) {
             ul = document.createElement('ul');
             ul.className = 'msgs';
-            document.querySelector('main').prepend(ul);
+            notices.prepend(ul);
         }
 
         const li = document.createElement('li');
         li.className = 'error';
         li.textContent = msg;
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'notice-close';
+        close.setAttribute('aria-label', 'סגירת הודעה');
+        close.textContent = '×';
+        li.append(close);
 
         ul.prepend(li);
         setTimeout(() => li.remove(), 6000);
