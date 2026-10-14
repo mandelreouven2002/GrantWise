@@ -127,8 +127,7 @@
 </head>
 <body>
 <header>
-<a class="brand" href="{% url 'grants' %}" style="color:inherit;text-decoration:none">LabFund</a>  {% if user.is_authenticated %}
-  <nav>
+<a class="brand" href="{% url 'home' %}" style="color:inherit;text-decoration:none">LabFund</a>  <nav>
     {% with u=request.resolver_match.url_name %}
     <a href="{% url 'orders' %}" class="{% if u == 'orders' %}on{% endif %}">הזמנות ודרישות</a>
     <a href="{% url 'grants' %}" class="{% if u == 'grants' %}on{% endif %}">מענקים</a>
