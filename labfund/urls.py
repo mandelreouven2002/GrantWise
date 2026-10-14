@@ -4,8 +4,7 @@ from django.urls import path
 from budget import views
 
 urlpatterns = [
-    path("grants/", views.grants_view, name="grants"),
-    path("orders/", views.orders_view, name="orders"),
+    path("", views.grants_view, name="grants"),    path("orders/", views.orders_view, name="orders"),
     path("orders/<int:pk>/file/", views.order_file, name="order_file"),
     path("resolve/", views.resolve_view, name="resolve"),
     path("resolve/approve/", views.resolve_approve, name="resolve_approve"),
