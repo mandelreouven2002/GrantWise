@@ -140,6 +140,7 @@ class Result:
     solver: str
     stale_fx: list
     notes: list = field(default_factory=list)      # instructions that could not be applied, and why
+    user_skipped: set = field(default_factory=set)  # request ids left out because the user unticked them
     held: dict = field(default_factory=dict)       # grant number -> amount kept aside by instruction (grant currency)
 
 
@@ -321,6 +322,37 @@ def eligible(c: Candidate, s: GrantState, today):
 
 AVOID_PENALTY = 3.0        # far above any normal cost (0.05–1.6) and far below BIG: used only when nothing else fits
 PREFER_BONUS = 0.5
+STRONG_BONUS = 2.0         # "first of all": outweighs the usual urgency/reserve differences
+BONUS = {"soft": PREFER_BONUS, "strong": STRONG_BONUS}
+
+
+def _matches(sel, s):
+    """Does grant state `s` fit a selector {vat: free|paid, grant, sponsor, currency}? (all given keys must)"""
+    g = s.grant
+    if sel.get("vat") == "free" and g.vat_required:
+        return False
+    if sel.get("vat") == "paid" and not g.vat_required:
+        return False
+    if sel.get("grant") and sel["grant"] != g.number:
+        return False
+    if sel.get("sponsor") and str(sel["sponsor"]).strip().casefold() != (g.sponsor or "").strip().casefold():
+        return False
+    if sel.get("currency") and str(sel["currency"]).upper() != g.currency:
+        return False
+    return True
+
+
+def _selector_text(sel):
+    parts = []
+    if sel.get("vat"):
+        parts.append("שלא משלמים מע״מ" if sel["vat"] == "free" else "שמשלמים מע״מ")
+    if sel.get("grant"):
+        parts.append(f"מספר {sel['grant']}")
+    if sel.get("sponsor"):
+        parts.append(f"של {sel['sponsor']}")
+    if sel.get("currency"):
+        parts.append(f"ב-{sel['currency']}")
+    return " ".join(parts)
 
 
 @dataclass
@@ -333,6 +365,10 @@ class Directives:
     forbid: dict = field(default_factory=lambda: defaultdict(set))   # order id -> grants
     pin: dict = field(default_factory=dict)        # order id -> grant
     held: dict = field(default_factory=dict)       # grant -> amount kept unspent (grant currency)
+    cat_prefer: list = field(default_factory=list)   # (category, selector, bonus): a nudge towards matching grants
+    cat_require: list = field(default_factory=list)  # (category, selector): only matching grants may fund it
+    currency_pos: dict = field(default_factory=dict)  # grant -> 0 (first in line) … 1 (last), by currency value
+    currency_bonus: float = 0.0
     notes: list = field(default_factory=list)
 
 
@@ -360,6 +396,25 @@ def directives(constraints, states, order_ids, today):
             d.forbid[oid].add(num)
         elif t == "pin":
             d.pin[oid] = num
+        elif t in ("prefer_for_category", "require_for_category"):
+            sel = {k: c[k] for k in ("vat", "grant", "sponsor", "currency") if c.get(k)}
+            cat = c.get("category")
+            if not cat or not sel:
+                continue
+            if not any(_matches(sel, s) for s in states.values()):
+                d.notes.append(f"ההוראה על הסעיף {cat} לא הופעלה: אין מענק פעיל {_selector_text(sel)}.")
+                continue
+            if t == "prefer_for_category":
+                d.cat_prefer.append((cat, sel, BONUS.get(c.get("strength"), PREFER_BONUS)))
+            else:
+                d.cat_require.append((cat, sel))
+        elif t == "currency_order":
+            rates = sorted({s.rate for s in states.values() if s.rate > 0})
+            weak_first = c.get("direction") != "strong_first"
+            for n, s in states.items():
+                pos = rates.index(s.rate) / (len(rates) - 1) if len(rates) > 1 and s.rate in rates else 0.0
+                d.currency_pos[n] = pos if weak_first else 1 - pos
+            d.currency_bonus = BONUS.get(c.get("strength"), PREFER_BONUS)
         elif t == "reserve_amount":
             try:
                 keep = Decimal(str(c.get("keep")))
@@ -540,9 +595,10 @@ def explain(c, s, avail_cat, urgency, amount_grant, cat_names=None, ranked=None,
 
 # --------------------------------------------------------------------------- compute (read-only)
 
-def compute(today=None, sap_as_of=None, constraints=None, **overrides):
+def compute(today=None, sap_as_of=None, constraints=None, skip_orders=None, **overrides):
     """Recommend funding for all open requests. Pure: performs no database writes.
-    `constraints`: the user's instructions (see `Directives`) — they change this calculation only."""
+    `constraints`: the user's instructions (see `Directives`) — they change this calculation only.
+    `skip_orders`: request ids to leave out (the page's unticked requests)."""
     p = {**settings.RESOLVE_DEFAULTS, **{k: v for k, v in overrides.items() if v is not None}}
     today = today or timezone.localdate()
     sap_batch = ImportBatch.latest(ImportBatch.Source.SAP_GRANTS)
@@ -553,6 +609,18 @@ def compute(today=None, sap_as_of=None, constraints=None, **overrides):
     from .fx import stale_rates
     states = grant_states(today, sap_as_of)
     b = collect(today, sap_as_of, p)
+    # Requests the user unticked on the page: left out of this calculation altogether (they use no balance).
+    skip = {int(i) for i in (skip_orders or [])}
+    user_skipped = set()
+    if skip:
+        kept = []
+        for c in b["candidates"]:
+            if c.order.pk in skip:
+                b["skipped"].append((c.order, "הוצאה מהחישוב לפי הבחירה שלך — לא נכללת בהמלצה ולא תופסת יתרה"))
+                user_skipped.add(c.order.pk)
+            else:
+                kept.append(c)
+        b["candidates"] = kept
     cands = b["candidates"]
     cat_names = dict(BudgetCategory.objects.values_list("code", "name_he"))
     d = directives(constraints, states, {c.order.pk for c in cands}, today)
@@ -569,8 +637,14 @@ def compute(today=None, sap_as_of=None, constraints=None, **overrides):
             if ok:
                 cst, urg = cost(c, s, p)
                 cst += AVOID_PENALTY * (num in d.avoid) - PREFER_BONUS * (num in d.prefer)
+                for cat, sel, bonus in d.cat_prefer:
+                    if c.category == cat and _matches(sel, s):
+                        cst -= bonus
+                cst += d.currency_bonus * d.currency_pos.get(num, 0.0)
                 blocked = ("הוחרג לפי הוראתך" if num in d.exclude else
-                           "נחסם לבקשה הזו לפי הוראתך" if num in d.forbid.get(c.order.pk, ()) else "")
+                           "נחסם לבקשה הזו לפי הוראתך" if num in d.forbid.get(c.order.pk, ()) else
+                           "לא מתאים להוראתך לסעיף הזה"
+                           if any(c.category == cat and not _matches(sel, s) for cat, sel in d.cat_require) else "")
                 opts.append(Option(state=s, cost=cst, urgency=urg, avail_cat=s.cat_cap(c.category), blocked=blocked))
             else:
                 why[num] = reason
@@ -644,6 +718,7 @@ def compute(today=None, sap_as_of=None, constraints=None, **overrides):
         short = Decimal(str(pulp.value(u[i]) or 0)).quantize(Q) if cands else Decimal("0")
         if short >= Decimal("0.01"):
             text = ("אין מענק כשיר להזמנה הזו." if not options[i] else
+                    "כל המענקים הכשירים הוחרגו או נחסמו לפי ההוראות שלך." if all(o.blocked for o in options[i]) else
                     "אין מענק אחד שהיתרה שלו מכסה את כל הסכום (אחרי שאר ההמלצות).")
             lines.append(Line(grant=None, amount_orig=(short / c.rate).quantize(Q), amount_ils=short, reason=text))
         plans.append(Plan(cand=c, lines=lines, options=options[i], why_not=why_not[i]))
@@ -663,7 +738,8 @@ def compute(today=None, sap_as_of=None, constraints=None, **overrides):
 
     return Result(today=today, sap_batch=sap_batch, sap_as_of=sap_as_of, params=p, states=states,
                   plans=plans, needs_amount=b["needs_amount"], standing=b["standing"], skipped=b["skipped"],
-                  alerts=alerts, solver=solver, stale_fx=stale_rates(today), notes=d.notes, held=dict(d.held))
+                  alerts=alerts, solver=solver, stale_fx=stale_rates(today), notes=d.notes, held=dict(d.held),
+                  user_skipped=user_skipped)
 
 
 # --------------------------------------------------------------------------- approve (writes)
