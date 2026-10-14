@@ -115,12 +115,14 @@ def grants_view(request):
         d = g.days_left(today)
         avail = (g.balance_total or 0) - pending[g.number]
         flags = []
-        if d is not None and d < 0 and g.balance_total > 0:
-            flags.append(("bad", "הסתיים עם יתרה"))
-        elif d is not None and d <= 120 and g.balance_total > 0:
-            flags.append(("warn", "קרוב לסיום"))
-        if any(v < 0 for k, v in lines.items() if k != "OVERHEAD") and not (d is not None and d < 0):
-            flags.append(("", "חריגה בסעיף"))
+        if d is not None:
+            if d < 0:
+                if g.balance_total > 0:
+                    flags.append(("bad", "הסתיים עם יתרה"))
+            elif d <= 45:
+                flags.append(("bad", "יפוג בתוך 45 ימים"))
+            elif d <= 90:
+                flags.append(("warn", "יפוג בתוך 90 ימים"))
         ils = _ils(avail, g.currency)
         if ils and avail > 0 and (d is None or d >= 0):
             total_ils += ils
