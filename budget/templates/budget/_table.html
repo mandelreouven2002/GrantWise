@@ -1,18 +1,15 @@
 <div class="tbl-wrap" data-table="{{ t.table.key }}">
 <table>
   <thead><tr>
-    {% if t.expandable %}<th></th>{% endif %}
     {% for c in t.cols %}<th class="{% if c.kind in 'money num int line calc' %}num{% endif %}">{{ c.label }}</th>{% endfor %}
     {% if t.table.deletable %}<th></th>{% endif %}
   </tr></thead>
   <tbody>
   {% for r in t.rows %}
     <tr data-pk="{{ r.pk }}" class="{{ r.cls }}">
-      {% if t.expandable %}<td><button type="button" class="toggle" title="הגדרות המענק" data-toggle="d-{{ t.table.key }}-{{ r.pk }}">▸</button></td>{% endif %}
       {% for c in r.cells %}{% include "budget/_cell.html" %}{% endfor %}
       {% if t.table.deletable %}<td><form method="post" action="{% url 'api_delete' t.table.key r.pk %}" onsubmit="return confirm('למחוק את השורה?')">{% csrf_token %}<input type="hidden" name="next" value="{{ request.get_full_path }}"><button class="btn link" title="מחיקה">✕</button></form></td>{% endif %}
     </tr>
-    {% if t.expandable and r.detail %}<tr class="detail" id="d-{{ t.table.key }}-{{ r.pk }}" hidden><td colspan="99">{% include "budget/_grant_detail.html" with d=r.detail %}</td></tr>{% endif %}
   {% empty %}
     <tr><td class="ro muted" colspan="99">אין שורות להצגה</td></tr>
   {% endfor %}

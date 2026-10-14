@@ -19,12 +19,6 @@
   </div>
 </details>
 
-{% elif tab == "projects" %}
-<p class="hint"><span class="info" tabindex="0" aria-label="מידע">i<span class="tip">פרויקטים שמופיעים כאן אפשר לבחור בטבלת ההזמנות, בהמלצות ובהגדרות המענקים. הזמנה בלי פרויקט מוצגת עם "-".
-  פרויקט-על מאפשר לקבוץ תתי-פרויקטים; קישור מענק לפרויקט-על חל גם על תתי-הפרויקטים שלו.</span></span></p>
-{% include "budget/_table.html" with t=projects %}
-{% include "budget/_inline_add.html" with t=projects %}
-
 {% elif tab == "users" %}
 {% if user.is_superuser %}
 <p class="hint"><span class="info" tabindex="0" aria-label="מידע">i<span class="tip">מנהל/ת יכול/ה לנהל משתמשים. משתמש לא פעיל לא יכול להיכנס, אבל ההיסטוריה שלו נשמרת.</span></span></p>

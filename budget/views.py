@@ -25,14 +25,14 @@ from .fx import MissingRate, rate_to_ils
 from .importers import run_import
 from .importers.preview import dry_run
 from .models import (Allocation, AutoFetchJob, OrderFile, PendingImport, SourceCredential, BudgetCategory, FxRate, Grant, ImportBatch, InventoryItem, OrderRequest,
-                     Project, ResolveRun, TrackedCurrency)
-from .tables import ADMIN_ONLY, TABLES, cell, choices_for, create_row, filtered, last_import, set_value
+                     ResolveRun, TrackedCurrency)
+from .tables import ADMIN_ONLY, LINE_CATS, TABLES, cell, choices_for, create_row, filtered, last_import, set_value
 
 
 # --------------------------------------------------------------------------- table helpers
 
-def table_ctx(key, qs, request=None, extras=None, paginate=True, row_class=None, expandable=False,
-              detail=None, title=None, parent=None):
+def table_ctx(key, qs, request=None, extras=None, paginate=True, row_class=None,
+              title=None, parent=None, hide=()):
     """Everything the _table.html include needs."""
     t = TABLES[key]
     page = None
@@ -41,7 +41,7 @@ def table_ctx(key, qs, request=None, extras=None, paginate=True, row_class=None,
         objs = list(page.object_list)
     else:
         objs = list(qs)
-    cols = [c for c in t.cols if not c.hidden]
+    cols = [c for c in t.cols if not c.hidden and c.field not in hide]
     col_choices = {c.field: choices_for(c) for c in cols}
     rows = []
     for o in objs:
@@ -54,13 +54,12 @@ def table_ctx(key, qs, request=None, extras=None, paginate=True, row_class=None,
                 ch = [(d["value"], d["value"])] + list(ch)   # keep unexpected values visible
             d["choices"] = ch
             cells.append(d)
-        rows.append(dict(obj=o, pk=o.pk, cells=cells, cls=row_class(o, ex) if row_class else "",
-                         detail=(detail or {}).get(o.pk)))
+        rows.append(dict(obj=o, pk=o.pk, cells=cells, cls=row_class(o, ex) if row_class else ""))
     qd = request.GET.copy() if request else None
     if qd is not None:
         qd.pop("page", None)
     return dict(table=t, cols=cols, rows=rows, page=page, qs=qd.urlencode() if qd else "",
-                expandable=expandable, title=title or t.title, parent=parent,
+                title=title or t.title, parent=parent,
                 add_cols=[dict(col=c, choices=choices_for(c)) for c in t.add_cols()],
                 last=last_import(t))
 
@@ -109,7 +108,7 @@ def grants_view(request):
         pending[num] += amount
         pending_cat[num, cat] += amount
 
-    extras, detail, total_ils = {}, {}, Decimal("0")
+    extras, total_ils = {}, Decimal("0")
     for g in grants:
         lines = {l.category_id: l.balance for l in g.current_lines()}
         d = g.days_left(today)
@@ -136,18 +135,12 @@ def grants_view(request):
             "ils": f"{ils:,.0f}" if ils is not None else "",
             "_expired": d is not None and d < 0, "_end": g.end_date or date.max,
         }
-        detail[g.pk] = dict(
-            reservations=table_ctx("reservations", g.reservations.all(), paginate=False, parent=g),
-            rules=table_ctx("rules", g.rules.all(), paginate=False, parent=g),
-            projects=table_ctx("projectgrants", g.projectgrant_set.select_related("project"), paginate=False,
-                               parent=g),
-            settings=[_cell_with_choices(c, g) for c in TABLES["grants"].cols if c.hidden],
-            decisions=(g.allocation_set.filter(status__in=[Allocation.Status.APPROVED, Allocation.Status.SUPERSEDED])
-                       .select_related("order", "category").order_by("-decided_at")),
-            grant=g)
     ordered = sorted(grants, key=lambda g: (extras[g.pk]["_expired"], extras[g.pk]["_end"]))
-    t = table_ctx("grants", ordered, request, extras=extras, paginate=False, expandable=True, detail=detail,
-                  row_class=lambda o, ex: "dim" if ex.get("_expired") else "")
+    # every budget category of the SAP file is a column — except those no grant on the page has a line for
+    used = {k for ex in extras.values() for k in ex if k.startswith("line:")}
+    hide = {f"line:{c}" for c, _ in LINE_CATS} - used
+    t = table_ctx("grants", ordered, request, extras=extras, paginate=False,
+                  row_class=lambda o, ex: "dim" if ex.get("_expired") else "", hide=hide)
     return render(request, "budget/grants.html", dict(
         t=t, total_ils=total_ils, show_all=show_all,
         open_orders=_awaiting_decision().filter(date_requested__gte=today - timedelta(days=180)).count()))
@@ -160,7 +153,7 @@ def orders_view(request):
     year = g.get("year", str(years[0]) if years else "")
     # Orders with a funding decision are not listed here: they wait in the recycle bin on the recommendations
     # page until marked "עודכן במערכות המעבדה" (then they disappear for good) or recycled back.
-    qs = (OrderRequest.objects.filter(is_current=True).select_related("project", "category")
+    qs = (OrderRequest.objects.filter(is_current=True).select_related("category")
           .exclude(allocations__status__in=DECIDED))
     if year and year != "all":
         qs = qs.filter(date_requested__year=int(year))
@@ -184,6 +177,8 @@ def orders_view(request):
                                              reverse("order_file", args=[r["pk"]]), stored[r["pk"]])
     return render(request, "budget/orders.html", dict(
         t=t, total=qs.count(), years=years, year=year,
+        grant_options=[(g.number, f"{g.number} · {(g.sponsor or g.description or '')[:40]}".rstrip(" ·"))
+                       for g in Grant.objects.order_by("number")],
         in_bin=(Allocation.objects.filter(status=Allocation.Status.APPROVED, lab_updated_at__isnull=True,
                                           order__is_current=True).values("order_id").distinct().count())))
 
@@ -214,7 +209,9 @@ def resolve_view(request):
     except (ValueError, MissingRate) as e:
         error = str(e)
 
-    rows, payload = [], {"margin": float(settings.RESOLVE_DEFAULTS["fx_margin"]), "grants": {}, "orders": {}}
+    cat_names_he = dict(BudgetCategory.objects.values_list("code", "name_he"))
+    rows, payload = [], {"margin": float(settings.RESOLVE_DEFAULTS["fx_margin"]), "grants": {}, "orders": {},
+                         "noVat": list(settings.RESOLVE_DEFAULTS["vat_free_categories"])}
     if result:
         used_grants = set()
         for plan in result.plans:
@@ -227,28 +224,30 @@ def resolve_view(request):
                                  end=g.end_date, days=st.days_left, avail_cat=op.avail_cat, total=st.total,
                                  pooled=st.pooled, rank=op.rank, urgent=op.urgency >= 0.5,
                                  reserve=g.is_reserve, priority=g.pi_priority))
+            first = next((l for l in plan.lines if l.grant), None)
+            rem = rem_where = None
+            if first:
+                op = next((x for x in opts if x["num"] == first.grant.number), None)
+                if op:
+                    rem = (op["total"] if op["pooled"] else op["avail_cat"]) - first.amount_grant
+                    rem_where = "מכלל המאגר" if op["pooled"] else "בסעיף " + cat_names_he.get(c.category, c.category)
             rows.append(dict(order=o, state=plan.state, lines=plan.lines, options=opts,
-                             why_not=sorted(plan.why_not.items()),
-                             cells={f: _cell_with_choices(TABLES["orders"].col(f), o) for f in
-                                    ("amount_est", "amount_currency", "category", "project")}))
+                             pay=first.amount_grant if first else None,
+                             rem=rem, rem_where=rem_where, rem_cur=first.grant.currency if first else "",
+                             why_not=sorted(plan.why_not.items())))
             payload["orders"][o.pk] = dict(amount=float(c.amount), cur=c.currency, rate=float(c.rate),
                                            cat=c.category, opts=[x["num"] for x in opts])
-        def _cells(o):
-            return {f: _cell_with_choices(TABLES["orders"].col(f), o) for f in
-                    ("amount_est", "amount_currency", "category", "project")}
-
         for o in result.needs_amount:
-            rows.append(dict(order=o, state="noamount", lines=[], options=[], why_not=[], cells=_cells(o)))
+            rows.append(dict(order=o, state="noamount", lines=[], options=[], why_not=[]))
         # Everything still open on the orders page is listed here, marked with why it gets no recommendation
         # (orders already decided here are in the recycle bin, or gone once marked as updated).
         decided = set(Allocation.objects.filter(status__in=DECIDED).values_list("order_id", flat=True))
         for o, why in result.skipped:
             if o.pk not in decided:
-                rows.append(dict(order=o, state="skipped", lines=[], options=[], why_not=[], note=why,
-                                 cells=_cells(o)))
+                rows.append(dict(order=o, state="skipped", lines=[], options=[], why_not=[], note=why))
         for o in result.standing:
             rows.append(dict(order=o, state="standing", lines=[], options=[], why_not=[],
-                             note="על הזמנה עומדת / שמור-מכור — כבר מחויבת ב-SAP, לא דורשת החלטה", cells=_cells(o)))
+                             note="על הזמנה עומדת / שמור-מכור — כבר מחויבת ב-SAP, לא דורשת החלטה"))
         for num in used_grants:
             st = result.states[num]
             g = st.grant
@@ -256,7 +255,7 @@ def resolve_view(request):
                 cur=g.currency, rate=float(st.rate), total=float(st.total), pooled=st.pooled,
                 cats={k: float(v) for k, v in st.cats.items()}, extra={k: float(v) for k, v in st.extra.items()},
                 label=(g.sponsor or g.description)[:40], end=g.end_date.strftime("%d/%m/%Y") if g.end_date else "",
-                days=st.days_left)
+                days=st.days_left, vat=float(resolver.vat_divisor(g)))
         rank = {"unfunded": 0, "ok": 1, "noamount": 2, "skipped": 3, "standing": 3}
         rows.sort(key=lambda r: (rank[r["state"]], -(r["order"].date_requested or date.min).toordinal()))
     payload["catNames"] = dict(BudgetCategory.objects.values_list("code", "name_he"))
@@ -619,7 +618,7 @@ def autofetch_shot(request, pk):
 
 # --------------------------------------------------------------------------- settings
 
-SETTINGS_TABS = [("fx", "שערי חליפין"), ("projects", "פרויקטים"), ("users", "משתמשים")]
+SETTINGS_TABS = [("fx", "שערי חליפין"), ("users", "משתמשים")]
 
 
 @login_required
@@ -636,12 +635,6 @@ def settings_view(request):
         ctx.update(currencies=table_ctx("currencies", TrackedCurrency.objects.all(), paginate=False, extras=extras,
                                         row_class=lambda o, ex: "" if o.is_active else "dim"),
                    history=table_ctx("fx", FxRate.objects.order_by("-date", "currency")[:60], paginate=False))
-    elif tab == "projects":
-        counts = dict(OrderRequest.objects.filter(project__isnull=False).values_list("project")
-                      .annotate(n=Count("id")).values_list("project", "n"))
-        extras = {p.pk: {"orders": counts.get(p.pk, 0) or ""} for p in Project.objects.all()}
-        ctx.update(projects=table_ctx("projects", Project.objects.order_by("-is_active", "name"), paginate=False,
-                                      extras=extras, row_class=lambda o, ex: "" if o.is_active else "dim"))
     elif tab == "users":
         extras = {u.pk: {"last_login": timezone.localtime(u.last_login).strftime("%d/%m/%Y %H:%M")
                          if u.last_login else "—"}

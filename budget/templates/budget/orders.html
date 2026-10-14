@@ -127,4 +127,6 @@
 
 {% include "budget/_table.html" %}
 
+<datalist id="grant-numbers">{% for n, label in grant_options %}<option value="{{ n }}">{{ label }}</option>{% endfor %}</datalist>
+
 {% endblock %}

@@ -4,7 +4,7 @@
   export has no stable ID. Editing those fields in LabSuit creates a 'new' order on next import.
 - The amount is LabSuit's own price: PRICE, else TOTAL / QUANTITY, when it is > 1. Nothing is estimated:
   a row without a price has no amount, and gets no recommendation until one is entered.
-- Lab-owned fields (project, category override, manual amount, notes) survive re-imports.
+- Lab-owned fields (project text, category override, manual amount, notes) survive re-imports.
 """
 from collections import Counter
 from decimal import Decimal
