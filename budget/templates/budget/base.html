@@ -1,108 +1,202 @@
 
+{% load static %}
 <!doctype html>
 <html lang="he" dir="rtl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-
-<title>{% block title %}LabFund{% endblock %}</title>
+<title>{% block title %}GrantWise{% endblock %}</title>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700&display=swap" rel="stylesheet">
 
 <style>
 :root {
-    --bg:#f6f7f9;
+    --bg:#f3f7fb;
     --card:#fff;
-    --ink:#1d2330;
-    --muted:#667085;
-    --line:#e4e7ec;
-    --accent:#2f5bd3;
-    --accent-bg:#eef3ff;
-    --good:#1f7a4d;
+    --ink:#19314d;
+    --muted:#71829b;
+    --line:#e0e8f1;
+    --accent:#2563dc;
+    --accent-bg:#eaf2ff;
+    --good:#178457;
     --warn:#b26a00;
     --bad:#b42318;
-    --info:#5b5bd6;
-    --good-bg:#e8f5ee;
+    --info:#3974d9;
+    --good-bg:#e8f7f0;
     --warn-bg:#fff4e0;
     --bad-bg:#fdecea;
-    --info-bg:#eeeefc;
+    --info-bg:#eaf2ff;
+    --nav:#172f4d;
+    --teal:#41d5d9;
 }
 
 * { box-sizing:border-box; }
 
 body {
     margin:0;
-    background:var(--bg);
+    min-height:100vh;
+    background:linear-gradient(155deg,#eef5fc,#f7faff 48%,#f2f7fd);
     color:var(--ink);
-    font:14px/1.45 Heebo,system-ui,sans-serif;
+    font:14px/1.5 Heebo,system-ui,sans-serif;
 }
 
+/* ========== NAVBAR ========== */
+
 header {
-    background:var(--ink);
-    color:#fff;
-    padding:0 20px;
+    min-height:72px;
+    background:linear-gradient(105deg,#102842,#203e61);
+    color:white;
+    padding:0 26px;
     display:flex;
-    gap:24px;
     align-items:center;
+    gap:30px;
     flex-wrap:wrap;
+    box-shadow:0 3px 14px rgba(19,43,72,.12);
 }
 
 header .brand {
+    display:flex;
+    align-items:center;
+    gap:12px;
+    color:white;
+    text-decoration:none;
+    padding:9px 0;
+}
+
+.brand-icon {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:49px;
+    height:49px;
+    flex-shrink:0;
+    border-radius:12px;
+    background:rgba(65,213,217,.10);
+}
+
+.brand-icon svg {
+    width:43px;
+    height:43px;
+}
+
+.brand-words {
+    display:flex;
+    flex-direction:column;
+    line-height:1.2;
+}
+
+.brand-name {
+    color:white;
+    font-size:24px;
     font-weight:700;
-    padding:13px 0;
+    direction:ltr;
+}
+
+.brand-caption {
+    color:#b9d1e5;
+    font-size:11px;
+    margin-top:4px;
 }
 
 header nav {
     display:flex;
-    gap:2px;
-    flex-wrap:wrap;
+    align-items:center;
+    align-self:stretch;
     flex:1;
+    gap:5px;
+    flex-wrap:wrap;
 }
 
-header a {
-    color:#cfd6e4;
+header nav a {
+    display:flex;
+    align-items:center;
+    color:#c9d8e8;
     text-decoration:none;
-    padding:13px 12px;
-    display:block;
+    font-weight:500;
+    padding:23px 16px 18px;
+    border-bottom:3px solid transparent;
+    transition:.18s;
 }
 
-header a.on,
-header a:hover {
+header nav a:hover {
     color:#fff;
-    box-shadow:inset 0 -3px 0 var(--accent);
+    background:rgba(255,255,255,.05);
+}
+
+header nav a.on {
+    color:white;
+    font-weight:700;
+    border-bottom-color:var(--teal);
+}
+
+.account {
+    display:flex;
+    align-items:center;
+    gap:11px;
+    color:#d8e7f5;
+    margin-inline-start:auto;
+}
+
+.account-avatar {
+    width:34px;
+    height:34px;
+    border-radius:50%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:linear-gradient(135deg,#4c87eb,#2562b4);
+    color:white;
+    font-size:15px;
+    font-weight:700;
 }
 
 header form button {
-    background:none;
-    border:0;
-    color:#98a2b3;
     font:inherit;
     cursor:pointer;
+    color:#d8e7f5;
+    background:none;
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:8px;
+    padding:7px 12px;
 }
+
+header form button:hover {
+    background:rgba(255,255,255,.08);
+}
+
+/* ========== MAIN LAYOUT ========== */
 
 main {
-    max-width:1600px;
+    max-width:1640px;
     margin:0 auto;
-    padding:18px 16px 60px;
+    padding:28px 24px 60px;
 }
 
-h1 { font-size:22px; margin:0; }
-h2 { font-size:16px; margin:26px 0 8px; }
+h1 {
+    font-size:27px;
+    margin:0;
+    font-weight:700;
+}
+
+h2 {
+    font-size:17px;
+    margin:26px 0 10px;
+}
 
 .titlebar {
     display:flex;
     align-items:center;
     gap:12px;
     flex-wrap:wrap;
-    margin-bottom:4px;
+    margin-bottom:18px;
 }
 
 .titlebar .spacer { flex:1; }
 
 .sub {
     color:var(--muted);
-    margin:2px 0 14px;
+    margin:4px 0 14px;
 }
 
 .muted { color:var(--muted); }
@@ -110,26 +204,95 @@ h2 { font-size:16px; margin:26px 0 8px; }
 .card {
     background:var(--card);
     border:1px solid var(--line);
-    border-radius:8px;
-    padding:12px 14px;
-    margin-bottom:12px;
+    border-radius:14px;
+    padding:16px 18px;
+    margin-bottom:14px;
+    box-shadow:0 5px 22px rgba(34,70,111,.035);
 }
 
-/* Statistics */
+/* ========== LABORATORY HERO ========== */
+
+.orders-hero {
+    position:relative;
+    min-height:190px;
+    padding:34px 40px;
+    margin:-28px -24px 0;
+    display:flex;
+    flex-direction:column;
+    align-items:flex-start;
+    justify-content:center;
+    overflow:hidden;
+
+    background-image:
+        linear-gradient(
+            270deg,
+            rgba(244,249,255,.98) 0%,
+            rgba(244,249,255,.88) 34%,
+            rgba(225,241,250,.12) 100%
+        ),
+        url("{% static 'budget/images/lab-background.jpg' %}");
+
+    background-size:cover;
+    background-position:center;
+    background-repeat:no-repeat;
+    background-color:#dcebf6;
+}
+
+.orders-hero h1 {
+    position:relative;
+    z-index:1;
+    font-size:32px;
+    color:#152e4d;
+    margin:0 0 7px;
+}
+
+.orders-subtitle {
+    position:relative;
+    z-index:1;
+    font-size:15px;
+    color:#607693;
+    margin:0;
+}
+
+.orders-panel {
+    position:relative;
+    z-index:2;
+    background:rgba(255,255,255,.98);
+    border:1px solid #e4ebf6;
+    border-radius:17px;
+    padding:23px;
+    margin-top:-16px;
+    box-shadow:0 14px 38px rgba(26,62,105,.08);
+}
+
+.orders-panel .titlebar {
+    margin-bottom:20px;
+}
+
+.orders-panel .toolbar {
+    margin:14px 0 22px;
+    gap:11px;
+}
+
+.orders-panel .tbl-wrap {
+    border-radius:12px;
+    box-shadow:none;
+}
+
+/* ========== STATS ========== */
 
 .kpis {
     display:flex;
     flex-wrap:wrap;
     align-items:baseline;
-    gap:0;
-    margin:6px 0 16px;
-    padding:8px 0;
+    margin:8px 0 18px;
+    padding:12px 0;
     border-top:1px solid var(--line);
     border-bottom:1px solid var(--line);
 }
 
 .kpi {
-    padding:2px 18px;
+    padding:2px 20px;
     border-inline-start:1px solid var(--line);
     display:flex;
     align-items:baseline;
@@ -142,14 +305,14 @@ h2 { font-size:16px; margin:26px 0 8px; }
 }
 
 .kpi b {
-    font-size:17px;
-    font-weight:600;
+    font-size:18px;
+    font-weight:700;
     font-variant-numeric:tabular-nums;
 }
 
 .kpi span {
-    color:var(--muted);
     font-size:13px;
+    color:var(--muted);
 }
 
 .kpi a {
@@ -159,22 +322,40 @@ h2 { font-size:16px; margin:26px 0 8px; }
 
 .kpi a:hover { color:var(--accent); }
 
-/* Tables */
+/* ========== FILTERS ========== */
 
 .toolbar {
     display:flex;
-    gap:8px;
     align-items:center;
+    gap:10px;
     flex-wrap:wrap;
-    margin:8px 0;
+    margin:12px 0 19px;
 }
+
+input.f, select.f {
+    font:inherit;
+    padding:9px 12px;
+    border:1px solid var(--line);
+    border-radius:9px;
+    background:white;
+    color:var(--ink);
+    min-height:39px;
+}
+
+input.f:focus, select.f:focus {
+    outline:2px solid #b8d3ff;
+    border-color:var(--accent);
+}
+
+/* ========== TABLES ========== */
 
 .tbl-wrap {
     overflow:auto;
     max-height:72vh;
-    background:var(--card);
+    background:white;
     border:1px solid var(--line);
-    border-radius:8px;
+    border-radius:13px;
+    box-shadow:0 6px 25px rgba(34,70,111,.04);
 }
 
 table {
@@ -182,7 +363,7 @@ table {
     width:100%;
 }
 
-th,td {
+th, td {
     padding:0;
     border-bottom:1px solid var(--line);
     text-align:right;
@@ -192,24 +373,23 @@ th,td {
 
 th {
     font-size:12px;
-    color:var(--muted);
-    font-weight:500;
-    background:#fafbfc;
+    color:#536e91;
+    font-weight:700;
+    background:#edf3fb;
     position:sticky;
     top:0;
     z-index:1;
-    padding:8px;
+    padding:12px 9px;
 }
 
-td.ro { padding:6px 8px; }
+td.ro { padding:10px 9px; }
 
-td.num,
-th.num {
+td.num, th.num {
     text-align:left;
     direction:ltr;
 }
 
-tr:hover td { background:#fafcff; }
+tr:hover td { background:#f5f9ff; }
 
 tr.dim td,
 tr.dim input,
@@ -219,10 +399,10 @@ tr.dim select {
 
 tr.total td {
     font-weight:700;
-    background:#fafbfc;
+    background:#f2f6fc;
 }
 
-/* Editable cells */
+/* ========== EDITABLE CELLS ========== */
 
 select.cell {
     width:auto;
@@ -234,8 +414,7 @@ select.cell {
     cursor:pointer;
 }
 
-select.cell:hover,
-select.cell:focus {
+select.cell:hover, select.cell:focus {
     appearance:auto;
     -webkit-appearance:auto;
 }
@@ -256,8 +435,8 @@ input[type=date].cell:focus::-webkit-calendar-picker-indicator {
     background:transparent;
     font:inherit;
     color:inherit;
-    padding:6px 8px;
-    border-radius:4px;
+    padding:7px 8px;
+    border-radius:5px;
 }
 
 .cell:hover { border-color:var(--line); }
@@ -265,7 +444,7 @@ input[type=date].cell:focus::-webkit-calendar-picker-indicator {
 .cell:focus {
     outline:none;
     border-color:var(--accent);
-    background:#fff;
+    background:white;
 }
 
 .cell.num {
@@ -298,7 +477,7 @@ td.chk {
     padding:0 8px;
 }
 
-/* Status labels */
+/* ========== STATUS ========== */
 
 .tag {
     display:inline-flex;
@@ -321,7 +500,6 @@ td.chk {
 
 .tag.good::before { background:#9aa5b4; }
 .tag.info::before { background:var(--accent); }
-
 .tag.warn { color:var(--ink); }
 .tag.warn::before { background:#d99a2b; }
 
@@ -338,7 +516,7 @@ td.chk {
     vertical-align:middle;
 }
 
-/* Information tooltips */
+/* ========== INFO TOOLTIPS ========== */
 
 .info {
     position:relative;
@@ -372,8 +550,7 @@ td.chk {
     text-align:start;
 }
 
-.info:hover .tip,
-.info:focus .tip {
+.info:hover .tip, .info:focus .tip {
     display:block;
 }
 
@@ -386,29 +563,34 @@ td.chk {
 
 .hint a { color:var(--muted); }
 
-/* Buttons */
+/* ========== BUTTONS ========== */
 
 .btn {
-    background:var(--accent);
-    color:#fff;
+    background:linear-gradient(135deg,#376ef0,#1c4bb7);
+    color:white;
     border:0;
-    border-radius:8px;
-    padding:7px 14px;
+    border-radius:9px;
+    padding:9px 15px;
     font:inherit;
+    font-weight:500;
     cursor:pointer;
     text-decoration:none;
     display:inline-block;
     white-space:nowrap;
+    box-shadow:0 2px 7px rgba(37,99,220,.13);
 }
 
+.btn:hover { filter:brightness(1.05); }
+
 .btn.ghost {
-    background:#fff;
+    background:white;
     color:var(--accent);
-    border:1px solid var(--accent);
+    border:1px solid #91b2fa;
+    box-shadow:none;
 }
 
 .btn.small {
-    padding:3px 10px;
+    padding:5px 11px;
     font-size:13px;
 }
 
@@ -416,6 +598,7 @@ td.chk {
     background:none;
     color:var(--muted);
     padding:2px 6px;
+    box-shadow:none;
 }
 
 .btn.link:hover { color:var(--bad); }
@@ -438,10 +621,6 @@ ul.cols {
     font-size:13px;
 }
 
-@media(max-width:700px) {
-    ul.cols { columns:1; }
-}
-
 td.old {
     color:var(--muted);
     text-decoration:line-through;
@@ -449,17 +628,14 @@ td.old {
 }
 
 td.new { font-weight:500; }
-
-tr.grp td {
-    border-top:1px solid var(--line);
-}
+tr.grp td { border-top:1px solid var(--line); }
 
 .preview-actions {
     gap:10px;
     margin:6px 0 14px;
 }
 
-/* Menus */
+/* ========== MENUS ========== */
 
 .menu {
     position:relative;
@@ -471,7 +647,7 @@ tr.grp td {
     inset-inline-end:0;
     top:calc(100% + 6px);
     z-index:30;
-    background:#fff;
+    background:white;
     border:1px solid var(--line);
     border-radius:10px;
     box-shadow:0 12px 32px rgba(16,24,40,.14);
@@ -491,8 +667,7 @@ tr.grp td {
     cursor:pointer;
 }
 
-.menu-list button:hover,
-.menu-list button:focus {
+.menu-list button:hover, .menu-list button:focus {
     background:var(--info-bg);
     outline:none;
 }
@@ -503,6 +678,8 @@ tr.grp td {
     font-size:12px;
     margin-top:2px;
 }
+
+/* ========== LABSUIT IMPORT ========== */
 
 .af-user { margin:12px 0 4px; }
 
@@ -540,16 +717,7 @@ tr.grp td {
     border-radius:6px;
 }
 
-input.f,
-select.f {
-    font:inherit;
-    padding:6px 8px;
-    border:1px solid var(--line);
-    border-radius:6px;
-    background:#fff;
-}
-
-/* Messages */
+/* ========== MESSAGES ========== */
 
 .msgs {
     list-style:none;
@@ -615,7 +783,7 @@ select.f {
     padding:2px 8px;
     border:1px solid var(--line);
     border-radius:6px;
-    background:#fff;
+    background:white;
 }
 
 .toggle {
@@ -638,7 +806,7 @@ tr.detail h3 {
     margin:0 0 6px;
 }
 
-/* Dialogs */
+/* ========== DIALOGS ========== */
 
 dialog {
     border:0;
@@ -697,10 +865,7 @@ dialog .actions {
     font-weight:500;
 }
 
-.seg {
-    display:flex;
-    gap:8px;
-}
+.seg { display:flex; gap:8px; }
 
 .seg label {
     flex:1;
@@ -723,27 +888,122 @@ dialog .actions {
     margin-top:2px;
 }
 
-@media(max-width:600px) {
-    main { padding:10px; }
+/* ========== RESPONSIVE ========== */
+
+@media(max-width:700px) {
+    ul.cols { columns:1; }
+
+    header {
+        padding:8px 14px;
+        gap:10px;
+    }
+
+    header nav {
+        order:3;
+        width:100%;
+        overflow-x:auto;
+        flex-wrap:nowrap;
+    }
+
+    header nav a {
+        white-space:nowrap;
+        padding:11px 12px;
+    }
+
+    .account {
+        margin-inline-start:auto;
+    }
+
+    main { padding:18px 10px 40px; }
     .kpi { min-width:44%; }
+
+    .orders-hero {
+        min-height:155px;
+        padding:24px 18px;
+        margin:-18px -10px 0;
+        background-position:35% center;
+    }
+
+    .orders-hero h1 {
+        font-size:24px;
+    }
+
+    .orders-panel {
+        padding:14px 10px;
+        margin-top:-10px;
+        border-radius:12px;
+    }
 }
 </style>
 </head>
 
 <body>
 
-<!-- Corrected navigation -->
 <header>
 
+    <!-- GrantWise branding -->
     <a class="brand"
        href="{% url 'home' %}"
-       style="color:inherit;text-decoration:none">
-        LabFund
+       aria-label="GrantWise - דף הבית">
+
+        <!-- Half brain, half laboratory flask -->
+        <span class="brand-icon" aria-hidden="true">
+            <svg viewBox="0 0 64 64"
+                 fill="none"
+                 xmlns="http://www.w3.org/2000/svg">
+
+                <!-- Brain half -->
+                <g stroke="#EAF6FF"
+                   stroke-width="2.8"
+                   stroke-linecap="round"
+                   stroke-linejoin="round">
+
+                    <path d="M31 12
+                             C26 7 18 9 17 16
+                             C10 16 7 23 11 29
+                             C5 35 9 43 15 44
+                             C14 52 23 56 31 51
+                             V12Z"/>
+
+                    <path d="M23 17C18 20 21 25 25 26"/>
+                    <path d="M16 30C23 28 25 33 23 38"/>
+                    <path d="M18 43C24 39 27 44 26 49"/>
+                    <path d="M31 17V49"/>
+                </g>
+
+                <!-- Flask half -->
+                <g stroke="#46DCE4"
+                   stroke-width="2.8"
+                   stroke-linecap="round"
+                   stroke-linejoin="round">
+
+                    <path d="M36 9H52"/>
+
+                    <path d="M40 9V28L33 47
+                             C31 52 34 56 40 56H55
+                             C61 56 63 52 60 47
+                             L50 28V9"/>
+
+                    <path d="M38 42H55"/>
+                    <path d="M43 47L46 49"/>
+
+                    <circle cx="50" cy="47" r="1.8"
+                            fill="#46DCE4" stroke="none"/>
+                </g>
+            </svg>
+        </span>
+
+        <span class="brand-words">
+            <span class="brand-name">GrantWise</span>
+            <span class="brand-caption">
+                ניהול חכם של מענקי מחקר
+            </span>
+        </span>
     </a>
 
     {% if user.is_authenticated %}
 
-    <nav>
+    <nav aria-label="ניווט ראשי">
         {% with u=request.resolver_match.url_name %}
 
         <a href="{% url 'orders' %}"
@@ -767,20 +1027,25 @@ dialog .actions {
         </a>
 
         <a href="{% url 'settings' %}"
-           class="{% if u == 'settings' %}on{% endif %}"
-           style="margin-inline-start:auto">
+           class="{% if u == 'settings' %}on{% endif %}">
             הגדרות
         </a>
 
         {% endwith %}
     </nav>
 
-    <form method="post" action="{% url 'logout' %}">
-        {% csrf_token %}
-        <button>
-            יציאה ({{ user.get_username }})
-        </button>
-    </form>
+    <div class="account">
+        <span class="account-avatar">
+            {{ user.get_username|first|upper }}
+        </span>
+
+        <span>{{ user.get_username }}</span>
+
+        <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button type="submit">יציאה</button>
+        </form>
+    </div>
 
     {% endif %}
 
@@ -811,7 +1076,7 @@ dialog .actions {
     {% block content %}{% endblock %}
 
     <footer class="foot">
-        LabFund {{ LABFUND_VERSION }} ·
+        GrantWise {{ LABFUND_VERSION }} ·
         כלי עזר להחלטות מימון —
         לא מחליף את SAP או LabSuit
     </footer>
@@ -823,13 +1088,13 @@ dialog .actions {
 <script>
 (function(){
 
-    const csrf = document.querySelector(
+    const csrfInput = document.querySelector(
         '[name=csrfmiddlewaretoken]'
-    ).value;
+    );
+    const csrf = csrfInput ? csrfInput.value : '';
 
     // Inline cell saving
     async function save(el) {
-
         const tr = el.closest('[data-pk]');
         const tbl = el.closest('[data-table]');
 
@@ -889,7 +1154,6 @@ dialog .actions {
     }
 
     function alertBar(msg) {
-
         let ul = document.querySelector('.msgs');
 
         if (!ul) {
@@ -899,12 +1163,10 @@ dialog .actions {
         }
 
         const li = document.createElement('li');
-
         li.className = 'error';
         li.textContent = msg;
 
         ul.prepend(li);
-
         setTimeout(() => li.remove(), 6000);
     }
 
@@ -925,9 +1187,8 @@ dialog .actions {
         }
     });
 
-    // Import menu
+    // Import dropdown
     document.addEventListener('click', e => {
-
         const m = e.target.closest('[data-menu]');
 
         document.querySelectorAll('.menu-list')
@@ -942,8 +1203,12 @@ dialog .actions {
             l.hidden = !l.hidden;
         }
 
-        if (e.target.closest('.menu-list [data-open]')) {
-            e.target.closest('.menu-list').hidden = true;
+        const clicked = e.target.closest(
+            '.menu-list [data-open]'
+        );
+
+        if (clicked) {
+            clicked.closest('.menu-list').hidden = true;
         }
     });
 
@@ -954,14 +1219,12 @@ dialog .actions {
         }
     });
 
-    // LabSuit automatic update
+    // LabSuit credentials
     document.addEventListener('click', e => {
-
         const t = e.target.closest('[data-cred-toggle]');
         if (!t) return;
 
         const box = t.closest('form').querySelector('.af-cred');
-
         box.hidden = !box.hidden;
 
         box.querySelectorAll('input').forEach(i => {
@@ -974,16 +1237,13 @@ dialog .actions {
         }
     });
 
+    // Dialog switch
     document.addEventListener('click', e => {
-
         const s = e.target.closest('[data-switch]');
         if (!s) return;
 
         s.closest('dialog').close();
-
-        document.getElementById(
-            s.dataset.switch
-        ).showModal();
+        document.getElementById(s.dataset.switch).showModal();
     });
 
     function afShow(form, part) {
@@ -993,7 +1253,6 @@ dialog .actions {
     }
 
     function afFail(form, j) {
-
         afShow(form, 'error');
 
         form.querySelector('.af-msg').textContent =
@@ -1020,8 +1279,8 @@ dialog .actions {
         }
     }
 
+    // Automatic LabSuit import
     document.addEventListener('submit', async e => {
-
         const form = e.target;
 
         if (!form.closest('dialog.autofetch')) {
@@ -1029,7 +1288,6 @@ dialog .actions {
         }
 
         e.preventDefault();
-
         afShow(form, 'progress');
 
         form.querySelector('.af-step').textContent =
@@ -1056,9 +1314,7 @@ dialog .actions {
         }
 
         if (!j.ok) {
-
             if (j.need_credentials) {
-
                 afShow(form, 'confirm');
 
                 const box = form.querySelector('.af-cred');
@@ -1083,7 +1339,6 @@ dialog .actions {
         });
 
         const poll = async () => {
-
             let s;
 
             try {
@@ -1119,12 +1374,10 @@ dialog .actions {
     });
 
     document.addEventListener('close', e => {
-
         if (
             e.target.matches &&
             e.target.matches('dialog.autofetch')
         ) {
-
             const f = e.target.querySelector('form');
 
             if (!f.querySelector('.af-progress').hidden) {
@@ -1133,18 +1386,14 @@ dialog .actions {
 
             afShow(f, 'confirm');
         }
-
     }, true);
 
-    // Dialogs and expandable rows
+    // Modals and expandable rows
     document.addEventListener('click', e => {
-
         const o = e.target.closest('[data-open]');
 
         if (o) {
-            document.getElementById(
-                o.dataset.open
-            ).showModal();
+            document.getElementById(o.dataset.open).showModal();
         }
 
         const c = e.target.closest('[data-close]');
@@ -1156,12 +1405,9 @@ dialog .actions {
         const t = e.target.closest('[data-toggle]');
 
         if (t) {
-            const row = document.getElementById(
-                t.dataset.toggle
-            );
+            const row = document.getElementById(t.dataset.toggle);
 
             row.hidden = !row.hidden;
-
             t.textContent = row.hidden ? '▸' : '▾';
         }
     });
