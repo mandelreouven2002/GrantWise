@@ -876,6 +876,10 @@ tr.grp td {
     background:var(--good-bg);
 }
 
+.msgs li.warning {
+    background:var(--warn-bg, #fff4d6);
+}
+
 .msgs li.error {
     background:var(--bad-bg);
 }
@@ -1265,7 +1269,8 @@ dialog .actions {
     {% if messages %}
     <ul class="msgs">
         {% for m in messages %}
-        <li class="{{ m.tags }}">{{ m }}<button type="button" class="notice-close" aria-label="סגירת הודעה">×</button></li>
+        {# "info" is also the class of the ⓘ tooltip icon (17px circle): a message must not carry it #}
+        <li class="{% if m.level_tag == 'info' %}notice-info{% else %}{{ m.tags }}{% endif %}">{{ m }}<button type="button" class="notice-close" aria-label="סגירת הודעה">×</button></li>
         {% endfor %}
     </ul>
     {% endif %}
