@@ -2,8 +2,6 @@
 
 # GrantWise / LabFund
 
-[כניסה למערכת](https://grantwise-production-730e.up.railway.app/)
-
 **כלי עזר להחלטות מימון במעבדת מחקר: מענקים, רכש ומשאבים**
 
 `גרסה 0.8.0` · Python 3.13 · Django 5.2 · PostgreSQL / SQLite · PuLP (CBC) · אוקטובר 2026
