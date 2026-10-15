@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- **README opens with the promotional video.** `docs/demo/GrantWise-ad.mp4` (41 s, 1080p, no narration, original synthesized music, synthetic demo data only) with a clickable poster image, at the top of the README.
+
+## Unreleased
 - **README: introduction and a handover guide.** The README now opens with the project's context (built for the "AI לתמיכה במעבדות" hackathon; where the AI is and is not used), and has a new section "מדריך התקנה והמשך פיתוח אצל המעבדה": prerequisites, step-by-step installation on Railway with the full variables table, installation on another server (Docker or plain Python, HTTPS, PostgreSQL, the `CSRF_TRUSTED_ORIGINS` note for another domain), what to change for another Bedrock key/region/model and for another AI provider (file and function level), the "behind the scenes" parameters and where they live, routine maintenance, privacy and security notes, what was and was not tested, and a prioritised list of what to continue.
 
 ## 0.8.0 — 2026-10-14
